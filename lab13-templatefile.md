@@ -1,53 +1,56 @@
-# Lab 13 — La fonction `templatefile` et Azure RBAC
+# 🟧 Lab 13 — La fonction `templatefile` et Azure RBAC
 
-> **Durée :** 40 min · **Jour 2** · **Adapté de :** Lab 13 *Template Provider*
+![Durée](https://img.shields.io/badge/Durée-40_min-2563eb) ![Jour](https://img.shields.io/badge/Jour-2-dc2626) ![Concepts](https://img.shields.io/badge/Concepts-templatefile_·_jsondecode_·_RBAC-7c3aed)
 
-## Objectif
+## 🎯 Objectifs
 
-Générer du contenu dynamique à partir d'un **modèle de fichier** :
+À la fin de ce lab, vous serez capable de :
 
-- écrire un modèle JSON avec des espaces réservés `${...}` ;
-- le rendre avec la fonction `templatefile` en lui passant des variables ;
-- utiliser le résultat pour créer des ressources Azure : un compte de stockage, un **rôle personnalisé Azure RBAC** et son attribution à l'identité courante.
+- ✅ **écrire** un modèle de fichier avec des espaces réservés `${...}` ;
+- ✅ **rendre** ce modèle avec `templatefile` et **le décoder** avec `jsondecode` ;
+- ✅ **créer** un rôle personnalisé Azure RBAC et **l'attribuer** à l'identité courante sur un compte de stockage ;
+- ✅ **vérifier** l'accès aux données avec `--auth-mode login`, sans clé de compte.
 
+> [!NOTE]
 > Sur AWS, le modèle produisait une politique IAM attachée à un bucket S3. Sur Azure, l'équivalent est une **définition de rôle RBAC** attribuée sur un Storage Account.
 
-## Schéma de l'objectif
+## 📋 Prérequis
+
+- Étapes 1 et 2 : Terraform uniquement, **aucune** connexion à Azure.
+- Étape 3 : le groupe **`rg-<identity>-lab13`, préparé par le formateur**, sur lequel votre SP est *User Access Administrator*.
+
+> [!IMPORTANT]
+> Avec le seul rôle **Contributor**, il est **impossible** de créer un rôle personnalisé ou une attribution de rôle (`Microsoft.Authorization/*/write`). C'est pourquoi le formateur a préparé ce groupe avec un droit supplémentaire, limité à lui seul.
+
+## 🗺️ Architecture
 
 ```mermaid
 flowchart LR
-    TPL["templates/storage_role.json.tpl<br/>${role_name}, ${scope}, ${owner_id}"] --> F
-    VARS["variables<br/>owner_id, scope, ..."] --> F
-    F["templatefile()"] --> JSON["local.policy<br/>JSON rendu"]
-    JSON --> OUT["output role_policy"]
+    TPL["📄 templates/storage_role.json.tpl<br/>${role_name} · ${scope} · ${owner_id}"]:::tf --> F
+    VARS["variables<br/>owner_id, scope…"]:::tf --> F
+    F["templatefile()"]:::tf --> JSON["local.policy<br/>JSON rendu"]:::tf
+    JSON --> OUT["output role_policy"]:::tf
     JSON -- "jsondecode()" --> RD
-    subgraph RG["rg-identity-lab13"]
-        SA["Storage Account stidentityxxxxxx<br/>conteneur demo"]
-        RD["azurerm_role_definition<br/>role-identity-storage"]
+    subgraph RG["rg-identity-lab13 (préparé par le formateur)"]
+        SA["Storage Account stidentityxxxxxx<br/>conteneur demo"]:::net
+        RD["azurerm_role_definition<br/>role-identity-storage"]:::sec
     end
-    RD --> RA["azurerm_role_assignment<br/>scope = Storage Account"]
-    ME["Identité courante<br/>data.azurerm_client_config"] --> RA
+    RD --> RA["azurerm_role_assignment<br/>scope = Storage Account"]:::sec
+    ME["Identité courante<br/>data.azurerm_client_config"]:::ext --> RA
     RA --> SA
+    classDef tf fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef net fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef sec fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef ext fill:#f1f5f9,stroke:#64748b,color:#0f172a
 ```
-
-## Prérequis
-
-- Tâches 1 et 2 : Terraform uniquement, aucune connexion à Azure.
-- Tâche 3 : rôle **Owner** ou **User Access Administrator** sur l'abonnement ou le groupe de ressources (nécessaire pour créer des rôles et des attributions).
 
 ---
 
-## Tâche 1 : créer un modèle
-
-### Étape 1.1
+## Étape 1 — Écrire le modèle
 
 ```bash
-mkdir -p ~/terraform-azure/lab13/templates && cd ~/terraform-azure/lab13/templates
+mkdir -p ~/terraform-azure/lab13/templates && cd ~/terraform-azure/lab13
 ```
-
-Le nom du fichier est libre. On conseille le suffixe `.tpl` pour l'identifier comme modèle, précédé de l'extension du contenu (`.json`).
-
-### Étape 1.2 : écrire le modèle
 
 `templates/storage_role.json.tpl` :
 
@@ -70,24 +73,23 @@ Le nom du fichier est libre. On conseille le suffixe `.tpl` pour l'identifier co
 }
 ```
 
-- `Actions` : opérations du plan de contrôle (gérer le compte et les conteneurs).
-- `DataActions` : opérations du plan de données (lire et écrire les blobs).
-- La syntaxe `${variable}` n'utilise **aucun préfixe** (`var.`, `local.`…) : seules les valeurs passées explicitement à `templatefile` sont visibles.
+| Bloc | Plan | Exemple |
+|---|---|---|
+| 🟦 `Actions` | **contrôle** : gérer le compte et les conteneurs | créer un conteneur |
+| 🟩 `DataActions` | **données** : lire et écrire les blobs | télécharger un fichier |
+
+> [!TIP]
+> Dans un modèle, `${variable}` s'écrit **sans préfixe** (`var.`, `local.`…) : seules les valeurs passées explicitement à `templatefile` sont visibles. Suffixe conseillé : `.json.tpl` (contenu `.json`, modèle `.tpl`).
 
 ---
 
-## Tâche 2 : rendre le modèle avec `templatefile`
-
-```bash
-cd ~/terraform-azure/lab13
-```
-
-### Étape 2.1 : variables et local
+## Étape 2 — Rendre le modèle (sans Azure)
 
 `main.tf` :
 
 ```hcl
 variable "owner_id" {
+  type    = string
   default = "anaconda"
 }
 
@@ -101,88 +103,55 @@ locals {
     scope                = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-${var.owner_id}-lab13"
   })
 }
-```
 
-`path.module` rend le chemin robuste, même si le code est utilisé comme sous‑module.
-
-### Étape 2.2 : afficher le résultat
-
-```hcl
 output "role_policy" {
   value = local.policy
 }
 ```
 
-### Étape 2.3 : exécuter
-
 ```bash
-terraform init
-terraform apply
-```
-
-```text
-Outputs:
-
-role_policy = <<EOT
-{
-  "Name": "role-anaconda-storage",
-  "Description": "Gestion des conteneurs et blobs du compte stanacondademo par anaconda",
-  ...
-  "AssignableScopes": ["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-anaconda-lab13"]
-}
-EOT
-```
-
-Testez dans la console :
-
-```bash
+terraform init && terraform apply
 terraform console
 > jsondecode(local.policy).DataActions
+> length(jsondecode(local.policy).Actions)
 ```
 
-> Le contenu rendu peut servir n'importe où : argument d'une ressource, d'un module, script `custom_data` d'une VM, etc.
+✏️ **TODO 1** — Retirez `owner_id` de la map passée à `templatefile` et relancez `terraform plan`. Quel message obtenez-vous ? Remettez-le.
 
 ---
 
-## Tâche 3 : créer le stockage et attacher le rôle
+## Étape 3 — Créer le stockage et attacher le rôle
 
-### Étape 3.1 : utiliser votre identifiant
+### 3.1 Les fichiers
 
-Remplacez la valeur par défaut de `owner_id` par votre identifiant (minuscules et chiffres uniquement, car il entre dans le nom du compte de stockage) :
+Remplacez le contenu du projet par quatre fichiers.
+
+`providers.tf` : `azurerm ~> 4.0` et `random ~> 3.6`, provider `azurerm` avec `features {}`.
+
+`variables.tf` :
 
 ```hcl
 variable "owner_id" {
-  default = "<identity>"
+  type = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9]{3,12}$", var.owner_id))
+    error_message = "owner_id : 3 à 12 caractères, minuscules et chiffres."
+  }
 }
 ```
 
-### Étape 3.2 : providers, groupe de ressources et compte de stockage
+`terraform.tfvars` : `owner_id = "<identity>"`.
 
-Remplacez le contenu de `main.tf` par :
+`main.tf` :
 
 ```hcl
-terraform {
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 4.0"
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
-    }
-  }
-}
-
-provider "azurerm" {
-  features {}
-}
-
-variable "owner_id" {
-  default = "<identity>"
-}
-
 data "azurerm_client_config" "current" {}
+
+# Groupe préparé par le formateur : on le LIT, on ne le crée pas
+data "azurerm_resource_group" "lab13" {
+  name = "rg-${var.owner_id}-lab13"
+}
 
 resource "random_string" "suffix" {
   length  = 6
@@ -190,17 +159,13 @@ resource "random_string" "suffix" {
   special = false
 }
 
-resource "azurerm_resource_group" "rg" {
-  name     = "rg-${var.owner_id}-lab13"
-  location = "francecentral"
-}
-
 resource "azurerm_storage_account" "demo" {
   name                            = "st${var.owner_id}${random_string.suffix.result}"
-  resource_group_name             = azurerm_resource_group.rg.name
-  location                        = azurerm_resource_group.rg.location
+  resource_group_name             = data.azurerm_resource_group.lab13.name
+  location                        = data.azurerm_resource_group.lab13.location
   account_tier                    = "Standard"
   account_replication_type        = "LRS"
+  min_tls_version                 = "TLS1_2"
   allow_nested_items_to_be_public = false
 }
 
@@ -211,9 +176,10 @@ resource "azurerm_storage_container" "demo" {
 }
 ```
 
-> Le lab d'origine utilisait `uuid()` dans le nom du bucket. `uuid()` change à **chaque** exécution, ce qui forcerait la recréation de la ressource à chaque `apply`. `random_string` génère une valeur une seule fois et la conserve dans l'état.
+> [!WARNING]
+> Le lab d'origine utilisait `uuid()` dans le nom du bucket. `uuid()` change à **chaque** exécution : la ressource serait **recréée à chaque `apply`**. `random_string` génère une valeur **une seule fois** et la conserve dans l'état.
 
-### Étape 3.3 : rendre le modèle avec les vraies valeurs et créer le rôle
+### 3.2 Rendre le modèle avec les vraies valeurs et créer le rôle
 
 ```hcl
 locals {
@@ -221,7 +187,7 @@ locals {
     owner_id             = var.owner_id
     role_name            = "role-${var.owner_id}-storage"
     storage_account_name = azurerm_storage_account.demo.name
-    scope                = azurerm_resource_group.rg.id
+    scope                = ____   # ✏️ TODO 2 : l'ID du groupe de ressources
   })
 
   role = jsondecode(local.policy)
@@ -230,11 +196,11 @@ locals {
 resource "azurerm_role_definition" "storage" {
   name        = local.role.Name
   description = local.role.Description
-  scope       = azurerm_resource_group.rg.id
+  scope       = data.azurerm_resource_group.lab13.id
 
   permissions {
     actions      = local.role.Actions
-    data_actions = local.role.DataActions
+    data_actions = ____   # ✏️ TODO 3
   }
 
   assignable_scopes = local.role.AssignableScopes
@@ -245,55 +211,67 @@ resource "azurerm_role_assignment" "me" {
   role_definition_id = azurerm_role_definition.storage.role_definition_resource_id
   principal_id       = data.azurerm_client_config.current.object_id
 }
-
-output "role_policy" {
-  value = local.policy
-}
-
-output "storage_account" {
-  value = azurerm_storage_account.demo.name
-}
 ```
 
-> Un rôle personnalisé peut être **défini** au niveau d'un abonnement ou d'un groupe de ressources (`AssignableScopes`), puis **attribué** à un niveau plus fin, ici le compte de stockage.
+`outputs.tf` : `role_policy` (= `local.policy`) et `storage_account` (= nom du compte).
 
-### Étape 3.4 : exécuter
+> [!NOTE]
+> Un rôle personnalisé est **défini** sur un abonnement ou un groupe (`AssignableScopes`), puis **attribué** à un niveau plus fin : ici, le compte de stockage.
+
+### 3.3 Appliquer
 
 ```bash
 terraform init -upgrade
 terraform apply
 ```
 
-```text
-Plan: 6 to add, 0 to change, 0 to destroy.
-...
-Apply complete! Resources: 6 added, 0 changed, 0 destroyed.
-```
+✏️ **TODO 4** — Notez le résumé du plan. Pourquoi le groupe de ressources n'en fait-il pas partie ?
 
-### Étape 3.5 : tester le rôle
+### 3.4 Tester le rôle
 
-Attendez 1 à 2 minutes (propagation RBAC), puis déposez un fichier **avec votre identité Entra ID** (sans clé de compte) :
+Attendez **1 à 2 minutes** (propagation RBAC), puis déposez un fichier **avec votre SP**, sans clé de compte :
 
 ```bash
+az login --service-principal -u "$ARM_CLIENT_ID" -p "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID" -o none
 SA=$(terraform output -raw storage_account)
 echo "Hello RBAC" > hello.txt
-az storage blob upload --auth-mode login --account-name "$SA" \
-  --container-name demo --name hello.txt --file hello.txt
-az storage blob list --auth-mode login --account-name "$SA" --container-name demo -o table
+az storage blob upload --auth-mode login --account-name "$SA" --container-name demo --name hello.txt --file hello.txt
+az storage blob list   --auth-mode login --account-name "$SA" --container-name demo -o table
 ```
 
 Vérifiez dans le portail : Storage Account → **Contrôle d'accès (IAM)** → **Attributions de rôles**.
 
-> Si vous êtes connecté avec le Service Principal (`ARM_*`), le rôle lui est attribué : utilisez `az login --service-principal ...` pour le test, ou exécutez Terraform avec `az login` utilisateur.
+---
 
-## Nettoyage
+## 🧹 Nettoyage
 
 ```bash
-terraform destroy
+terraform destroy      # le groupe rg-<identity>-lab13 est conservé (il n'est que lu)
 ```
 
-## Vérification
+## ✅ Vérification
 
 - [ ] L'output `role_policy` affiche le JSON rendu avec vos valeurs.
 - [ ] Le rôle `role-<identity>-storage` apparaît dans le portail.
 - [ ] L'upload avec `--auth-mode login` fonctionne.
+
+## 🧯 Si vous voyez…
+
+| Message | Cause | Solution |
+|---|---|---|
+| `AuthorizationFailed … Microsoft.Authorization/roleDefinitions/write` | groupe non préparé ou mauvais groupe | prévenez le formateur |
+| `Resource Group "rg-…-lab13" was not found` | groupe non préparé | prévenez le formateur |
+| `RoleDefinitionDoesNotExist` à l'attribution | propagation du rôle pas terminée | relancez `terraform apply` |
+| `This request is not authorized to perform this operation using this permission` (upload) | propagation RBAC (1 à 5 min) ou CLI connectée avec un autre compte | attendez ; `az account show` |
+| `Invalid template interpolation value` | variable manquante dans la map de `templatefile` | ajoutez-la |
+
+## 🏆 Défi
+
+Rendez la liste `DataActions` **paramétrable** : passez une liste `data_actions` à `templatefile` et générez le tableau JSON avec `${jsonencode(data_actions)}` dans le modèle.
+
+## ❓ Questions de compréhension
+
+1. Pourquoi un modèle ne voit-il pas `var.owner_id` directement ?
+2. Différence entre `Actions` et `DataActions` ?
+3. Pourquoi le rôle **Contributor** ne permet-il pas ce lab ?
+4. Pourquoi préférer `random_string` à `uuid()` dans un nom de ressource ?

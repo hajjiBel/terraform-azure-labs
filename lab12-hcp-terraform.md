@@ -1,188 +1,218 @@
-# Lab 12 — HCP Terraform et GitHub (workflow VCS)
+# 🟪 Lab 12 — HCP Terraform et GitHub (workflow VCS)
 
-> **Durée :** 75 min · **Jour 2** · **Adapté de :** Lab 12 *Terraform Cloud Basics*
+![Durée](https://img.shields.io/badge/Durée-75_min-2563eb) ![Jour](https://img.shields.io/badge/Jour-2-dc2626) ![Fil rouge](https://img.shields.io/badge/Fil_rouge-GitOps-ea580c) ![Concepts](https://img.shields.io/badge/Concepts-HCP_Terraform_·_VCS_·_plan_spéculatif-7c3aed)
 
-## Objectif
+## 🎯 Objectifs
 
-Mettre en place un **workflow GitOps** pour l'infrastructure Azure :
+À la fin de ce lab, vous serez capable de :
 
-- connecter **HCP Terraform** (anciennement Terraform Cloud) à un dépôt GitHub contenant le fil rouge ;
-- fournir à HCP Terraform les identifiants Azure du Service Principal (variables d'environnement `ARM_*`) ;
-- observer un plan qui échoue, le corriger par une **pull request** et voir le plan spéculatif s'exécuter sur la PR ;
-- valider et appliquer depuis l'interface, puis détruire l'infrastructure.
+- ✅ **connecter** un workspace HCP Terraform à un dépôt GitHub ;
+- ✅ **configurer** les variables Terraform et les identifiants Azure (`ARM_*`, marqués *Sensitive*) d'un workspace ;
+- ✅ **diagnostiquer** un plan qui échoue et le **corriger** par une pull request ;
+- ✅ **lire** un plan spéculatif sur une PR, puis **appliquer** et **détruire** depuis l'interface ;
+- ✅ **adapter** une configuration à une exécution sur des runners éphémères.
 
-## Schéma de l'objectif
+## 📋 Prérequis
+
+- Compte HCP Terraform gratuit : <https://app.terraform.io/>.
+- Compte GitHub.
+- Vos valeurs `ARM_*` : `cat ~/.azure-tf.env`.
+
+## 🗺️ Architecture
 
 ```mermaid
 flowchart LR
-    DEV["Formateur / participant"] -- "git push + pull request" --> GH["GitHub<br/>dépôt terraform-azure-fil-rouge"]
+    DEV["👤 Vous"]:::ext -- "git push + pull request" --> GH["🐙 GitHub<br/>terraform-azure-fil-rouge"]:::ext
     GH -- "webhook VCS" --> HCP
-    subgraph HCP["HCP Terraform · organisation / workspace"]
-        VARS["Variables<br/>identity (Terraform)<br/>ARM_CLIENT_ID, ARM_CLIENT_SECRET,<br/>ARM_TENANT_ID, ARM_SUBSCRIPTION_ID (env)"]
-        RUN["Run : plan puis Confirm & apply"]
-        ST[("État géré par HCP")]
+    subgraph HCP["🟪 HCP Terraform · organisation / workspace"]
+        VARS["Variables<br/>identity · allowed_ssh_cidr · write_private_key (Terraform)<br/>ARM_CLIENT_ID · ARM_CLIENT_SECRET 🔒 · ARM_TENANT_ID · ARM_SUBSCRIPTION_ID (env)"]:::sec
+        RUN["Run : plan → Confirm & apply"]:::tf
+        ST[("État géré par HCP")]:::state
     end
-    HCP -- "statut du plan sur la PR" --> GH
-    RUN -- "Service Principal" --> AZ["Azure<br/>rg-identity-lab, VMs web"]
+    HCP -- "statut du plan sur la PR ✅ / ❌" --> GH
+    RUN -- "Service Principal" --> AZ["☁️ Azure<br/>rg-identity-lab · web-1 · web-2"]:::compute
     RUN --> ST
+    classDef tf fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef compute fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef sec fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef state fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef ext fill:#f1f5f9,stroke:#64748b,color:#0f172a
 ```
-
-## Prérequis
-
-- Un compte HCP Terraform gratuit : <https://app.terraform.io/>.
-- Un compte GitHub.
-- Le Service Principal créé au lab 01 (`appId`, `password`, `tenant`).
 
 ---
 
-## Tâche 1 : connecter GitHub à HCP Terraform
+## Étape 1 — Préparer le code et le dépôt
 
-### Étape 1.1 : préparer le dépôt
+### 1.1 Détruire l'infrastructure locale
 
-HCP Terraform va gérer **son propre état**. Pour éviter deux copies de la même infrastructure, détruisez d'abord le fil rouge :
+HCP Terraform va gérer **son propre état**. Pour éviter deux copies de la même infrastructure :
 
 ```bash
 cd ~/terraform-azure/terraform
 terraform destroy
+az group delete --name rg-<identity>-shared --yes    # groupe "partagé" du lab 09
 ```
 
-Préparez ensuite le code pour une exécution distante :
+### 1.2 Adapter le code à une exécution distante
 
-1. Supprimez le bloc `backend "azurerm" { ... }` ajouté au lab 11 (l'état sera stocké par HCP Terraform).
-2. Supprimez la source de données `azurerm_resource_group.shared` et son output (lab 09) : ce groupe de ressources n'existe plus.
-3. Créez un fichier `.gitignore` :
+1. Supprimez `backend.tf` (lab 11) : l'état sera stocké par HCP Terraform.
+2. Les runners HCP sont **éphémères** : écrire `keys/<identity>.pem` n'y a aucun sens. Rendez le fichier optionnel :
 
-```gitignore
-.terraform/
-*.tfstate
-*.tfstate.*
-*.tfvars
-keys/
-crash.log
+```hcl
+variable "write_private_key" {
+  description = "Écrire la clé privée dans keys/ (false sur HCP Terraform)"
+  type        = bool
+  default     = true
+}
 ```
 
-4. Créez sur GitHub un dépôt **vide** nommé `terraform-azure-fil-rouge`, puis poussez le code :
+```diff
+ resource "local_sensitive_file" "private_key" {
++  count = ____   # ✏️ TODO 1 : 1 si write_private_key, sinon 0
++
+   content         = tls_private_key.ssh.private_key_pem
+```
+
+3. Vérifiez le `.gitignore` (lab 02) et que `.terraform.lock.hcl` **est** bien présent.
+
+> [!WARNING]
+> **Ne retirez pas** la source de données `rg-<identity>-shared` du lab 09 : son échec est l'objet de l'étape 3.
+
+### 1.3 Pousser sur GitHub
+
+Créez sur GitHub un dépôt **privé et vide** `terraform-azure-fil-rouge`, puis :
 
 ```bash
 git init -b main
 git add .
+git status          # ⚠️ aucun *.tfstate, *.tfvars, keys/ ne doit apparaître
 git commit -m "Fil rouge Terraform Azure"
 git remote add origin https://github.com/<github-user>/terraform-azure-fil-rouge.git
 git push -u origin main
 ```
 
-> Le fichier `.terraform.lock.hcl` **doit** être versionné : il garantit que HCP Terraform utilise les mêmes versions de providers que vous.
+> [!TIP]
+> `.terraform.lock.hcl` **doit** être versionné : HCP Terraform utilisera exactement vos versions de providers.
 
-### Étape 1.2 : créer l'organisation et le workspace
+### 1.4 Créer l'organisation et le workspace
 
-1. Sur <https://app.terraform.io/>, créez une organisation (nom unique) si vous n'en avez pas.
-2. **New → Workspace** → **Version Control Workflow**.
-3. Choisissez **GitHub → GitHub.com**. Une fenêtre demande d'autoriser HCP Terraform sur votre compte GitHub : cliquez **Authorize**.
-4. Sélectionnez le dépôt `terraform-azure-fil-rouge`.
-5. Laissez le nom du workspace et les options avancées par défaut, puis cliquez **Create**.
-
-HCP Terraform récupère la configuration (*Configuration uploaded successfully*).
+1. Sur <https://app.terraform.io/>, créez une organisation (nom unique) si nécessaire.
+2. **New → Workspace → Version Control Workflow → GitHub.com** → **Authorize**.
+3. Choisissez `terraform-azure-fil-rouge`, laissez les options par défaut → **Create**.
 
 ---
 
-## Tâche 2 : configurer les variables
+## Étape 2 — Configurer les variables
 
-Ouvrez l'onglet **Variables** du workspace. Il en existe deux types :
+Onglet **Variables** du workspace :
 
-- **Terraform variables** : équivalent de `terraform.tfvars` ;
-- **Environment variables** : injectées dans l'environnement d'exécution de Terraform.
+| Type | Clé | Valeur | Sensible |
+|---|---|---|---|
+| 🟪 Terraform | `identity` | `<identity>` | non |
+| 🟪 Terraform | `allowed_ssh_cidr` | `*` | non |
+| 🟪 Terraform | `write_private_key` | `false` (cochez **HCL**) | non |
+| 🟧 Environment | `ARM_CLIENT_ID` | `appId` du SP | non |
+| 🟥 Environment | `ARM_CLIENT_SECRET` | secret du SP | ✅ **oui** |
+| 🟧 Environment | `ARM_TENANT_ID` | tenant | non |
+| 🟧 Environment | `ARM_SUBSCRIPTION_ID` | abonnement | non |
 
-### Étape 2.1 : variable Terraform
+> [!CAUTION]
+> `allowed_ssh_cidr = "*"` : les provisioners se connectent en SSH **depuis les runners HCP**, dont les IP varient. Le port 22 est donc ouvert à Internet pendant ce lab. C'est une des raisons de préférer `custom_data` (lab 06) en production.
 
-| Clé | Valeur | Sensible |
-|---|---|---|
-| `identity` | `<identity>` | non |
+> [!NOTE]
+> Une variable **Sensitive** est en écriture seule : elle n'est plus jamais affichée, même pour vous.
 
-### Étape 2.2 : identifiants Azure (variables d'environnement)
-
-HCP Terraform s'exécute sur ses propres machines : il n'a pas accès à votre session `az login`. On lui fournit le Service Principal :
-
-| Clé | Valeur | Sensible |
-|---|---|---|
-| `ARM_CLIENT_ID` | `appId` du Service Principal | non |
-| `ARM_CLIENT_SECRET` | `password` du Service Principal | **oui** |
-| `ARM_TENANT_ID` | `tenant` | non |
-| `ARM_SUBSCRIPTION_ID` | ID de l'abonnement | non |
-
-Une variable marquée **Sensitive** est en écriture seule : elle n'est plus jamais affichée dans l'interface. Cliquez **Save variable** pour chacune.
+✏️ **TODO 2** — Pourquoi `write_private_key = false` doit-il être coché **HCL** ?
 
 ---
 
-## Tâche 3 : lancer un plan (il va échouer)
+## Étape 3 — Lancer un plan (il va échouer)
 
-**Actions → Start new run** (type *Plan only* ou *Plan and apply*). Indiquez une raison, puis ouvrez le détail du run.
+**Actions → Start new run → Plan and apply**, puis ouvrez le run.
 
-```text
-Error: No value for required variable
+### 🔍 Observer
 
-  on variables.tf line 1:
-   1: variable "subscription_id" {
+✏️ **TODO 3** — Recopiez le message d'erreur. Quelle ressource du code est en cause, et pourquoi ce plan réussissait-il en local ?
 
-The root module input variable "subscription_id" is not set, and has no default value.
+---
+
+## Étape 4 — Corriger par une pull request
+
+### 4.1 Modifier le code dans une branche
+
+```bash
+git switch -c fix-shared-rg
 ```
 
-C'est voulu : au lab 04, on a ajouté `subscription_id = var.subscription_id` dans le provider, mais la valeur était dans `terraform.tfvars`, que l'on n'a pas versionné. Plutôt que d'ajouter une variable de plus, on va laisser le provider lire `ARM_SUBSCRIPTION_ID`.
+✏️ **TODO 4** — Supprimez du code ce qui provoque l'erreur (2 blocs), puis :
 
----
-
-## Tâche 4 : corriger le code par une pull request
-
-### Étape 4.1 : modifier le code dans une branche
-
-Sur GitHub, ouvrez `main.tf`, cliquez sur l'icône crayon et modifiez le provider :
-
-```hcl
-provider "azurerm" {
-  features {}
-  # subscription_id est lu depuis la variable d'environnement ARM_SUBSCRIPTION_ID
-}
+```bash
+terraform fmt && terraform validate
+git commit -am "Retire la lecture du groupe partagé supprimé"
+git push -u origin fix-shared-rg
 ```
 
-Dans `variables.tf`, supprimez le bloc `variable "subscription_id"`.
+Sur GitHub : **Compare & pull request** → **Create pull request**.
 
-En bas de page, sélectionnez **Create a new branch for this commit and start a pull request**, puis **Propose changes** et **Create pull request**.
+### 4.2 Le plan spéculatif
 
-> Vous pouvez aussi travailler en local : `git switch -c fix-subscription`, modifier, `git push -u origin fix-subscription`, puis ouvrir la PR.
+Après quelques secondes, la PR affiche un check **Terraform plan has changes**. Cliquez **Details** : HCP Terraform a exécuté un **plan spéculatif** (jamais appliqué) sur le code de la branche.
 
-### Étape 4.2 : le plan spéculatif
+✏️ **TODO 5** — Combien de ressources à créer ? Retrouvez dans le détail les 2 VM et leurs IP publiques.
 
-Après quelques secondes, la PR affiche un check **Terraform plan has changes** : HCP Terraform a exécuté un **plan spéculatif** (jamais appliqué) sur le code de la branche. Cliquez **Details** pour lire le plan : une quinzaine de ressources à créer.
+### 4.3 Fusionner
 
-### Étape 4.3 : fusionner
-
-Cliquez **Merge pull request** puis **Confirm merge**.
+**Merge pull request** → **Confirm merge**.
 
 ---
 
-## Tâche 5 : confirmer et appliquer
+## Étape 5 — Confirmer et appliquer
 
-De retour dans HCP Terraform, onglet **Runs** : le commit de fusion a déclenché un nouveau run. Une fois le plan terminé, il attend une validation.
+Onglet **Runs** : le commit de fusion déclenche un run. Une fois le plan terminé : **Confirm & apply** → **Confirm plan**.
 
-Cliquez **Confirm & apply**, ajoutez un commentaire si vous le souhaitez, puis **Confirm plan**.
+Suivez l'exécution : les provisioners se connectent en SSH depuis les runners HCP. À la fin, ouvrez une URL de l'output `urls`.
 
-Suivez l'exécution : les provisioners du lab 06 se connectent en SSH depuis les machines HCP Terraform (le NSG autorise le port 22 depuis Internet). À la fin, copiez une URL de l'output `public_dns` dans votre navigateur : la page Apache s'affiche.
-
-Explorez ensuite l'onglet **States** : l'historique des versions de l'état est conservé.
+Explorez **States** : l'historique des versions de l'état est conservé et consultable.
 
 ---
 
-## Tâche 6 : détruire
+## Étape 6 — Détruire
 
-Dans le workspace : **Settings → Destruction and Deletion → Queue destroy plan**. Saisissez le nom du workspace pour confirmer, puis **Confirm & apply** sur le run de destruction.
+**Settings → Destruction and Deletion → Queue destroy plan** → saisissez le nom du workspace → **Confirm & apply**.
 
-> Le lab d'origine demandait une variable `CONFIRM_DESTROY=1` : elle n'est plus nécessaire dans les versions actuelles de HCP Terraform.
+> [!IMPORTANT]
+> Vérifiez dans le portail Azure que `rg-<identity>-lab` a bien disparu.
 
-## Vérification
+---
 
+## ✅ Vérification
+
+- [ ] Le premier run a échoué avec une erreur compréhensible.
 - [ ] La PR affiche le résultat du plan spéculatif.
-- [ ] L'apply depuis HCP Terraform a créé les VM et la page web répond.
+- [ ] L'apply depuis HCP a créé les VM et la page web répond.
 - [ ] L'infrastructure est détruite à la fin du lab.
 
-## Pour aller plus loin : sans secret, avec OIDC
+## 🧯 Si vous voyez…
 
-Plutôt qu'un `ARM_CLIENT_SECRET`, HCP Terraform peut utiliser des **identifiants dynamiques** (Workload Identity Federation) : on crée une *federated credential* sur l'application Entra ID, puis on définit dans le workspace `TFC_AZURE_PROVIDER_AUTH=true` et `TFC_AZURE_RUN_CLIENT_ID=<appId>`. Aucun secret n'est alors stocké.
+| Message | Cause | Solution |
+|---|---|---|
+| `subscription ID could not be determined` | `ARM_SUBSCRIPTION_ID` absent ou de type Terraform | variable de type **Environment** |
+| `No value for required variable "identity"` | variable non définie ou de type Environment | type **Terraform** |
+| `Invalid value for input variable … a bool is required` | `write_private_key` non coché HCL | cochez **HCL** |
+| `timeout … dial tcp …:22` | `allowed_ssh_cidr` ≠ `*` | voir étape 2 |
+| `Error: Failed to read ssh public key` | un `file("~/.ssh/…")` traîne dans le code | utilisez la clé `tls` (lab 05) |
+
+## 🏆 Défi
+
+Ajoutez dans **Settings → General** une **Terraform version** épinglée, et activez **Auto-apply** sur un workspace de test. Quels risques présente l'auto-apply ?
+
+## ❓ Questions de compréhension
+
+1. Pourquoi faut-il détruire l'infrastructure locale avant de passer sur HCP Terraform ?
+2. Qu'est-ce qu'un plan **spéculatif** ? Peut-il modifier l'infrastructure ?
+3. Différence entre une variable *Terraform* et une variable *Environment* dans un workspace ?
+4. Pourquoi le fichier de clé privée pose-t-il problème sur un runner HCP ?
+
+## 🚀 Pour aller plus loin — sans secret, avec OIDC
+
+Plutôt qu'un `ARM_CLIENT_SECRET`, HCP Terraform peut utiliser des **identifiants dynamiques** (Workload Identity Federation) : *federated credential* sur l'application Entra ID, puis dans le workspace `TFC_AZURE_PROVIDER_AUTH=true` et `TFC_AZURE_RUN_CLIENT_ID=<appId>`. Aucun secret n'est alors stocké.

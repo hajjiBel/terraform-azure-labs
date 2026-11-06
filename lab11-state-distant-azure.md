@@ -1,100 +1,116 @@
-# Lab 11 — Stocker l'état dans Azure Storage
+# 🟪 Lab 11 — Stocker l'état dans Azure Storage
 
-> **Durée :** 45 min · **Jour 2** · **Adapté de :** Lab 11 *Store State Remotely on Terraform Cloud*
+![Durée](https://img.shields.io/badge/Durée-45_min-2563eb) ![Jour](https://img.shields.io/badge/Jour-2-dc2626) ![Concepts](https://img.shields.io/badge/Concepts-backend_azurerm_·_verrou_·_migrate--state-7c3aed)
 
-## Objectif
+## 🎯 Objectifs
 
-Remplacer l'état local par un **état distant partagé et verrouillé** dans un compte de stockage Azure (backend `azurerm`) :
+À la fin de ce lab, vous serez capable de :
 
-- préparer le compte de stockage et le conteneur qui hébergeront les états ;
-- créer un projet qui écrit son état dans Azure ;
-- créer un second projet qui **lit** cet état avec `terraform_remote_state` ;
-- observer le **verrouillage** (bail de blob) et migrer l'état du fil rouge.
+- ✅ **préparer** un compte de stockage sécurisé pour les états (versioning, TLS 1.2, pas d'accès public) ;
+- ✅ **configurer** un backend `azurerm` avec une **configuration partielle** (`-backend-config`) ;
+- ✅ **lire** un état distant avec `terraform_remote_state` ;
+- ✅ **provoquer** et **expliquer** le verrouillage (bail de blob) ;
+- ✅ **migrer** l'état local du fil rouge vers Azure sans rien recréer.
 
-> Le lab d'origine utilisait Terraform Cloud comme backend. Sur Azure, le backend natif est un Storage Account ; HCP Terraform est abordé au lab 12.
+## 📋 Prérequis
 
-## Schéma de l'objectif
+Fil rouge déployé (lab 09). `source ~/.azure-tf.env` fait.
+
+## 🗺️ Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Azure["Groupe de ressources rg-identity-tfstate"]
-        subgraph SA["Storage Account sttfstateidentityxxxx"]
+    subgraph Azure["☁️ rg-identity-tfstate"]
+        subgraph SA["Storage Account sttfidentityxxxxxx · versioning ✅ · TLS 1.2 · privé"]
             subgraph C["Conteneur tfstate"]
-                B1[("lab11/write_state.tfstate")]
-                B2[("lab11/read_state.tfstate")]
-                B3[("fil-rouge.tfstate")]
+                B1[("lab11/write_state.tfstate")]:::state
+                B2[("lab11/read_state.tfstate")]:::state
+                B3[("fil-rouge.tfstate")]:::state
             end
         end
     end
-    W["Projet write_state<br/>backend azurerm<br/>output random"] -- "écrit + bail (verrou)" --> B1
-    R["Projet read_state<br/>backend azurerm"] -- "écrit" --> B2
+    W["📁 write_state<br/>output random"]:::tf -- "écrit + 🔒 bail" --> B1
+    R["📁 read_state"]:::tf -- "écrit" --> B2
     B1 -- "data terraform_remote_state" --> R
-    FR["Fil rouge<br/>terraform init -migrate-state"] -- "migration" --> B3
+    FR["📁 Fil rouge<br/>terraform init -migrate-state"]:::compute -- "migration" --> B3
+    classDef tf fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef compute fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef state fill:#f3e8ff,stroke:#9333ea,color:#581c87
 ```
+
+> [!NOTE]
+> Le lab d'origine utilisait Terraform Cloud comme backend. Sur Azure, le backend natif est un **Storage Account** ; HCP Terraform est abordé au lab 12.
 
 ---
 
-## Tâche 1 : préparer le stockage des états
+## Étape 1 — Préparer le stockage des états
 
-Le stockage de l'état doit exister **avant** le projet qui l'utilise (problème de « l'œuf et la poule »). On le crée ici avec l'Azure CLI.
+Le stockage doit exister **avant** le projet qui l'utilise (problème de l'œuf et de la poule) : on le crée avec l'Azure CLI.
 
 ```bash
-IDENTITY="<identity>"
+mkdir -p ~/terraform-azure/lab11 && cd $_
+# Connexion de la CLI avec votre SP (même identité que Terraform)
+az login --service-principal -u "$ARM_CLIENT_ID" -p "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID" -o none
+```
+
+Créez `bootstrap.sh` :
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+IDENTITY="${1:?Usage : bash bootstrap.sh <identity>}"
+
 RG="rg-${IDENTITY}-tfstate"
-SA="sttfstate${IDENTITY}$RANDOM"   # 3 à 24 caractères, minuscules et chiffres, unique dans Azure
+SA="sttf${IDENTITY}$(openssl rand -hex 3)"   # 3 à 24 caractères [a-z0-9], unique dans tout Azure
 LOCATION="francecentral"
 
-az group create --name "$RG" --location "$LOCATION"
+az group create --name "$RG" --location "$LOCATION" -o none
 
-az storage account create \
-  --name "$SA" \
-  --resource-group "$RG" \
-  --location "$LOCATION" \
-  --sku Standard_LRS \
-  --min-tls-version TLS1_2 \
-  --allow-blob-public-access false
+az storage account create --name "$SA" --resource-group "$RG" --location "$LOCATION" \
+  --sku Standard_LRS --min-tls-version TLS1_2 --allow-blob-public-access false -o none
 
-# Versioning des blobs : permet de restaurer une version précédente de l'état
-az storage account blob-service-properties update \
-  --account-name "$SA" --resource-group "$RG" --enable-versioning true
+# ✏️ TODO 1 : activer le versioning des blobs (az storage account blob-service-properties update …)
 
 ACCOUNT_KEY=$(az storage account keys list -g "$RG" -n "$SA" --query '[0].value' -o tsv)
+az storage container create --name tfstate --account-name "$SA" --account-key "$ACCOUNT_KEY" -o none
 
-az storage container create --name tfstate --account-name "$SA" --account-key "$ACCOUNT_KEY"
-
-echo "Storage account : $SA"
+cat > ~/.tfstate.env <<EOT
+export TFSTATE_RG="$RG"
+export TFSTATE_SA="$SA"
+export ARM_ACCESS_KEY="$ACCOUNT_KEY"
+EOT
+chmod 600 ~/.tfstate.env
+echo "✅ Compte de stockage : $SA"
 ```
-
-Le backend `azurerm` peut s'authentifier avec la clé du compte via une variable d'environnement :
 
 ```bash
-export ARM_ACCESS_KEY="$ACCOUNT_KEY"
+bash bootstrap.sh <identity>
+source ~/.tfstate.env
 ```
 
-> **En production**, on préfère l'authentification Entra ID (`use_azuread_auth = true`) avec le rôle *Storage Blob Data Contributor*, ce qui évite de manipuler des clés.
+> [!TIP]
+> Le nom du compte est **aléatoire** : il est mémorisé dans `~/.tfstate.env`. Sans ce fichier, retrouvez-le avec `az storage account list -g rg-<identity>-tfstate --query [].name -o tsv`.
+
+> [!CAUTION]
+> `ARM_ACCESS_KEY` donne un accès **total** au compte de stockage. En production, on préfère l'authentification Entra ID (`use_azuread_auth = true`) avec le rôle *Storage Blob Data Contributor*.
 
 ---
 
-## Tâche 2 : un projet qui stocke son état dans Azure
-
-### Étape 2.1
+## Étape 2 — Un projet qui stocke son état dans Azure
 
 ```bash
 mkdir -p ~/terraform-azure/lab11/write_state && cd $_
 ```
 
-### Étape 2.2 : configurer le backend
-
-`write_state/main.tf` (remplacez `<SA>` par le nom de votre compte de stockage) :
+`main.tf` :
 
 ```hcl
-# write_state/main.tf
 terraform {
+  required_version = ">= 1.9"
+
   backend "azurerm" {
-    resource_group_name  = "rg-<identity>-tfstate"
-    storage_account_name = "<SA>"
-    container_name       = "tfstate"
-    key                  = "lab11/write_state.tfstate"
+    container_name = "tfstate"
+    key            = "lab11/write_state.tfstate"
   }
 
   required_providers {
@@ -104,14 +120,10 @@ terraform {
     }
   }
 }
-```
 
-### Étape 2.3 : générer un output aléatoire
-
-```hcl
 resource "random_id" "random" {
   keepers = {
-    uuid = uuid()     # nouvelle valeur à chaque apply
+    uuid = uuid()   # nouvelle valeur à chaque apply
   }
   byte_length = 8
 }
@@ -121,79 +133,54 @@ output "random" {
 }
 ```
 
-### Étape 2.4 : provisionner
+> [!IMPORTANT]
+> Le bloc `backend` est lu **avant** les variables : **aucune** `var.*` n'y est permise. Les valeurs propres à chacun sont passées à l'`init` (**configuration partielle**).
 
 ```bash
-terraform init
+terraform init \
+  -backend-config="resource_group_name=$TFSTATE_RG" \
+  -backend-config="storage_account_name=$TFSTATE_SA"
 terraform apply -auto-approve
+ls terraform.tfstate 2>/dev/null || echo "✅ aucun état local"
+az storage blob list --container-name tfstate --account-name "$TFSTATE_SA" -o table
 ```
 
-Aucun fichier `terraform.tfstate` n'est créé localement. Vérifiez dans Azure :
-
-```bash
-az storage blob list --container-name tfstate --account-name "$SA" --account-key "$ARM_ACCESS_KEY" -o table
-```
-
-Dans le portail Azure (Storage Account → Conteneurs → `tfstate`), ouvrez le blob : c'est le JSON de l'état.
+Dans le portail (Storage Account → Conteneurs → `tfstate`), ouvrez le blob : c'est le JSON de l'état.
 
 ---
 
-## Tâche 3 : un projet qui lit l'état distant
-
-### Étape 3.1
+## Étape 3 — Un projet qui lit l'état distant
 
 ```bash
 mkdir -p ~/terraform-azure/lab11/read_state && cd $_
 ```
 
-### Étape 3.2 : backend et ressource aléatoire
-
-`read_state/main.tf` :
+`variables.tf` :
 
 ```hcl
-# read_state/main.tf
-terraform {
-  backend "azurerm" {
-    resource_group_name  = "rg-<identity>-tfstate"
-    storage_account_name = "<SA>"
-    container_name       = "tfstate"
-    key                  = "lab11/read_state.tfstate"
-  }
-
-  required_providers {
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
-    }
-  }
+variable "tfstate_rg" {
+  type = string
 }
 
-resource "random_id" "random" {
-  keepers = {
-    uuid = uuid()
-  }
-  byte_length = 8
+variable "tfstate_sa" {
+  type = string
 }
 ```
 
-### Étape 3.3 : lire l'état de `write_state`
+`main.tf` : même bloc `terraform` que `write_state`, avec `key = "lab11/read_state.tfstate"`, la même ressource `random_id`, puis :
 
 ```hcl
 data "terraform_remote_state" "write_state" {
   backend = "azurerm"
 
   config = {
-    resource_group_name  = "rg-<identity>-tfstate"
-    storage_account_name = "<SA>"
+    resource_group_name  = var.tfstate_rg
+    storage_account_name = var.tfstate_sa
     container_name       = "tfstate"
-    key                  = "lab11/write_state.tfstate"
+    key                  = "____"   # ✏️ TODO 2
   }
 }
-```
 
-### Étape 3.4 : afficher les deux valeurs
-
-```hcl
 output "random" {
   value = random_id.random.hex
 }
@@ -203,32 +190,30 @@ output "write_state_random" {
 }
 ```
 
-### Étape 3.5 : exécuter
+✏️ **TODO 3** — Fournissez `tfstate_rg` et `tfstate_sa` **sans fichier** : quelles variables d'environnement exporter ?
 
 ```bash
-terraform init
+terraform init -backend-config="resource_group_name=$TFSTATE_RG" -backend-config="storage_account_name=$TFSTATE_SA"
 terraform apply -auto-approve
 ```
 
 ```text
-Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
-
 Outputs:
 
-random = "c1597ca0fbba3997"
+random             = "c1597ca0fbba3997"
 write_state_random = "0de9168d0b78ead6"
 ```
 
-Les deux valeurs sont distinctes : `write_state_random` provient bien de l'autre projet.
-
 ---
 
-## Tâche 4 : observer le verrouillage
+## Étape 4 — 🔒 Observer le verrouillage
 
-Ouvrez **deux terminaux** dans `write_state` (avec `ARM_ACCESS_KEY` exporté dans les deux).
+Ouvrez **deux terminaux** dans `write_state`, et dans chacun : `source ~/.azure-tf.env && source ~/.tfstate.env`.
 
-- Terminal 1 : `terraform apply` et **ne répondez pas** à la confirmation.
-- Terminal 2 : `terraform apply`.
+| Terminal 1 | Terminal 2 |
+|---|---|
+| `terraform apply` et **ne répondez pas** | |
+| | `terraform apply` |
 
 ```text
 Error: Error acquiring the state lock
@@ -240,31 +225,37 @@ Lock Info:
   Who:       student01@poste
 ```
 
-Le backend `azurerm` pose un **bail (lease)** sur le blob pendant l'opération. Répondez `no` dans le terminal 1 : le verrou est libéré.
+Le backend pose un **bail (lease)** sur le blob. Répondez `no` dans le terminal 1 : le verrou est libéré.
 
-> En cas de verrou orphelin (crash), on peut le libérer avec `terraform force-unlock <ID>`, avec précaution.
+✏️ **TODO 4** — Dans le portail, pendant que le terminal 1 attend, quel est l'**état du bail** du blob (*Lease state*) ?
+
+> [!WARNING]
+> Verrou orphelin (crash, Ctrl+C brutal) : `terraform force-unlock <ID>`, **uniquement** si vous êtes sûr que plus aucune commande ne tourne.
 
 ---
 
-## Tâche 5 : migrer l'état du fil rouge
+## Étape 5 — Migrer l'état du fil rouge
 
 ```bash
 cd ~/terraform-azure/terraform
+terraform plan     # doit afficher No changes AVANT la migration
 ```
 
-Ajoutez dans le bloc `terraform { }` de `main.tf` :
+Créez `backend.tf` :
 
 ```hcl
+terraform {
   backend "azurerm" {
-    resource_group_name  = "rg-<identity>-tfstate"
-    storage_account_name = "<SA>"
-    container_name       = "tfstate"
-    key                  = "fil-rouge.tfstate"
+    container_name = "tfstate"
+    key            = "fil-rouge.tfstate"
   }
+}
 ```
 
 ```bash
-terraform init -migrate-state
+terraform init -migrate-state \
+  -backend-config="resource_group_name=$TFSTATE_RG" \
+  -backend-config="storage_account_name=$TFSTATE_SA"
 ```
 
 ```text
@@ -273,32 +264,39 @@ Do you want to copy existing state to the new backend?
 ```
 
 ```bash
-terraform plan      # No changes : l'état a bien été migré
+terraform plan     # ✅ No changes : l'état a bien été migré
+mkdir -p ~/backup-tfstate && mv terraform.tfstate* ~/backup-tfstate/
 ```
 
-Vous pouvez ensuite supprimer les fichiers `terraform.tfstate*` locaux.
+### 🔍 Observer
 
-> Le projet `lab10/secondary` lisait l'état local du fil rouge : il faudrait désormais passer à `backend = "azurerm"` dans son `terraform_remote_state`.
+✏️ **TODO 5** — Le projet `lab10/secondary` lit encore `../../terraform/terraform.tfstate`. Que se passe-t-il maintenant ? Adaptez-le au backend `azurerm`.
 
-## Vérification
+---
 
-- [ ] Les blobs `lab11/write_state.tfstate`, `lab11/read_state.tfstate` et `fil-rouge.tfstate` existent dans le conteneur.
+## ✅ Vérification
+
+- [ ] Les blobs `lab11/write_state.tfstate`, `lab11/read_state.tfstate` et `fil-rouge.tfstate` existent.
 - [ ] Vous avez provoqué et compris l'erreur de verrouillage.
 - [ ] `terraform plan` sur le fil rouge indique **No changes** après la migration.
+- [ ] `az storage account show -n $TFSTATE_SA --query "{tls:minimumTlsVersion, public:allowBlobPublicAccess}"` → `TLS1_2`, `false`.
 
-## Pour aller plus loin : backend HCP Terraform
+## 🧯 Si vous voyez…
 
-L'équivalent direct du lab d'origine utilise le bloc `cloud` (le backend `remote` est l'ancienne syntaxe) :
+| Message | Cause | Solution |
+|---|---|---|
+| `Variables not allowed` dans `backend` | `var.*` dans le bloc backend | configuration partielle `-backend-config` |
+| `Backend configuration changed` | backend modifié depuis le dernier init | `terraform init -reconfigure` (ou `-migrate-state`) |
+| `StorageAccountAlreadyTaken` | nom déjà pris dans Azure | relancez `bootstrap.sh` (suffixe aléatoire) |
+| `Failed to get existing workspaces: … AuthorizationFailure` | `ARM_ACCESS_KEY` absent | `source ~/.tfstate.env` |
+| `state blob is already locked` | verrou actif | attendez, ou `force-unlock` en dernier recours |
 
-```hcl
-terraform {
-  cloud {
-    organization = "<ORGANISATION>"
-    workspaces {
-      name = "lab11-write-state"
-    }
-  }
-}
-```
+## 🏆 Défi
 
-Authentification : `terraform login`.
+Supprimez le blob `lab11/write_state.tfstate` dans le portail, puis **restaurez** la version précédente grâce au versioning (onglet *Versions* du blob). `terraform plan` dans `write_state` doit retrouver l'état.
+
+## ❓ Questions de compréhension
+
+1. Pourquoi ne peut-on pas utiliser de variables dans un bloc `backend` ?
+2. Quels sont les 4 avantages d'un état distant sur un état local ?
+3. Que fait exactement `terraform init -migrate-state` ? Modifie-t-il des ressources Azure ?

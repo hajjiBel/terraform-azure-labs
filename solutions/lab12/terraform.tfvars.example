@@ -1,0 +1,4 @@
+# En local uniquement. Sur HCP Terraform, ces valeurs sont des "Terraform variables" du workspace.
+identity          = "student01"
+allowed_ssh_cidr  = "203.0.113.10/32" # sur HCP : "*" (les runners HCP doivent joindre le port 22)
+write_private_key = true              # sur HCP : false

@@ -1,96 +1,81 @@
-# Lab 15 — Réseau virtuel Azure complet (VNet)
+# 🟦 Lab 15 — Réseau virtuel Azure complet (VNet)
 
-> **Durée :** 50 min · **Jour 2** · **Adapté de :** Lab 15 *VPC*
+![Durée](https://img.shields.io/badge/Durée-50_min-2563eb) ![Jour](https://img.shields.io/badge/Jour-2-dc2626) ![Coût](https://img.shields.io/badge/Coût-NAT_Gateway_à_l'heure-dc2626) ![Concepts](https://img.shields.io/badge/Concepts-for__each_·_for…if_·_route_table_·_NAT-7c3aed)
 
-## Objectif
+## 🎯 Objectifs
 
-Construire avec Terraform un réseau Azure prêt pour la production, équivalent du VPC AWS à 3 sous‑réseaux publics et 3 privés :
+À la fin de ce lab, vous serez capable de :
 
-- un **VNet** `10.0.0.0/16` ;
-- **3 sous‑réseaux publics** et **3 sous‑réseaux privés** en `/24`, générés avec `for_each` ;
-- une **table de routage** associée aux sous‑réseaux publics ;
-- une **NAT Gateway** pour la sortie Internet des sous‑réseaux privés ;
-- comprendre les différences de conception entre AWS et Azure.
+- ✅ **construire** un VNet avec 3 sous-réseaux publics et 3 privés générés par **un seul** bloc `for_each` ;
+- ✅ **filtrer** une map avec une expression `for … if` ;
+- ✅ **associer** une table de routage aux sous-réseaux publics et une **NAT Gateway** aux privés ;
+- ✅ **expliquer** les différences de conception réseau entre AWS et Azure.
 
-## Schéma de l'objectif
+## 📋 Prérequis
+
+`source ~/.azure-tf.env` fait. Aucun lab précédent requis.
+
+## 🗺️ Architecture
 
 ```mermaid
 flowchart TB
-    INET(("Internet"))
+    INET(("🌍 Internet")):::ext
     subgraph RG["rg-identity-lab15 · francecentral"]
         subgraph VNET["VNet vnet-main · 10.0.0.0/16"]
             subgraph PUB["Sous-réseaux publics"]
-                P1["snet-public-1<br/>10.0.1.0/24"]
-                P2["snet-public-2<br/>10.0.2.0/24"]
-                P3["snet-public-3<br/>10.0.3.0/24"]
+                P1["snet-public-1<br/>10.0.1.0/24"]:::net
+                P2["snet-public-2<br/>10.0.2.0/24"]:::net
+                P3["snet-public-3<br/>10.0.3.0/24"]:::net
             end
-            subgraph PRIV["Sous-réseaux privés (sans sortie implicite)"]
-                R1["snet-private-1<br/>10.0.4.0/24"]
-                R2["snet-private-2<br/>10.0.5.0/24"]
-                R3["snet-private-3<br/>10.0.6.0/24"]
+            subgraph PRIV["Sous-réseaux privés · sans sortie implicite"]
+                R1["snet-private-1<br/>10.0.4.0/24"]:::sec
+                R2["snet-private-2<br/>10.0.5.0/24"]:::sec
+                R3["snet-private-3<br/>10.0.6.0/24"]:::sec
             end
         end
-        RT["Route table rt-public<br/>0.0.0.0/0 vers Internet"]
-        NAT["NAT Gateway nat-main<br/>+ IP publique pip-nat"]
+        RT["Route table rt-public<br/>0.0.0.0/0 → Internet"]:::tf
+        NAT["NAT Gateway nat-main<br/>+ IP publique pip-nat 💶"]:::replace
     end
     RT -. "associée" .-> P1 & P2 & P3
     NAT -. "associée" .-> R1 & R2 & R3
     P1 <-- "VM avec IP publique" --> INET
     NAT -- "sortie uniquement" --> INET
+    classDef tf fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef net fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef sec fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef replace fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    classDef ext fill:#f1f5f9,stroke:#64748b,color:#0f172a
 ```
 
-## AWS et Azure : ce qui change
+## 🔁 AWS et Azure : ce qui change
 
 | AWS (lab d'origine) | Azure |
 |---|---|
 | `aws_vpc` | `azurerm_virtual_network` |
-| Subnet lié à **une** zone de disponibilité | Subnet **régional**, couvrant toutes les zones. La zone se choisit sur la VM ou l'IP publique |
+| Subnet lié à **une** zone de disponibilité | Subnet **régional** ; la zone se choisit sur la VM ou l'IP |
 | `map_public_ip_on_launch` | Pas d'équivalent : une VM est « publique » si on lui associe une IP publique |
-| Internet Gateway obligatoire | Pas de ressource : le routage vers Internet est assuré par les **routes système** |
+| Internet Gateway obligatoire | Pas de ressource : routes **système** |
 | Route table + associations | `azurerm_route_table` + `azurerm_subnet_route_table_association` |
 | NAT Gateway | `azurerm_nat_gateway` |
 | Subnet privé = pas de route vers l'IGW | `default_outbound_access_enabled = false` + NAT Gateway |
-| `enable_dns_support`, `enable_dns_hostnames` | Activés par défaut (DNS Azure `168.63.129.16`) |
+| `enable_dns_support` / `enable_dns_hostnames` | Activés par défaut (DNS Azure `168.63.129.16`) |
 
-> Azure réserve **5 adresses** par sous‑réseau (`.0`, `.1`, `.2`, `.3` et `.255`) : un `/24` offre donc 251 adresses utilisables.
+> [!NOTE]
+> Azure réserve **5 adresses** par sous-réseau (`.0`, `.1`, `.2`, `.3` et `.255`) : un `/24` offre donc 251 adresses utilisables.
 
 ---
 
-## Étape 1 : créer le VNet
+## Étape 1 — Le projet et le VNet
 
 ```bash
 mkdir -p ~/terraform-azure/lab15-16 && cd $_
 ```
 
-`provider.tf` :
+`providers.tf` : `azurerm ~> 4.0`, `required_version >= 1.9`, provider avec `features {}`.
 
-```hcl
-terraform {
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 4.0"
-    }
-  }
-}
+`variables.tf` : `identity` (avec validation `^[a-z0-9]{3,12}$`) et `location` (défaut `francecentral`).
 
-provider "azurerm" {
-  features {}
-}
-```
-
-`vars.tf` :
-
-```hcl
-variable "identity" {
-  type = string
-}
-
-variable "location" {
-  type    = string
-  default = "francecentral"
-}
-```
+`terraform.tfvars` : `identity = "<identity>"`.
 
 `vnet.tf` :
 
@@ -100,7 +85,6 @@ resource "azurerm_resource_group" "rg" {
   location = var.location
 }
 
-# Réseau principal
 resource "azurerm_virtual_network" "main" {
   name                = "vnet-main"
   address_space       = ["10.0.0.0/16"]
@@ -113,16 +97,11 @@ resource "azurerm_virtual_network" "main" {
 }
 ```
 
-- `address_space = ["10.0.0.0/16"]` : plage d'adresses privées, découpée ensuite en sous‑réseaux `/24`.
-- Le tag `Name` permet de repérer facilement le réseau dans le portail.
-
 ---
 
-## Étape 2 : créer les sous‑réseaux
+## Étape 2 — Les sous-réseaux avec un seul `for_each`
 
-Le lab d'origine écrivait six blocs presque identiques. Grâce à `for_each` (lab 08), un seul bloc suffit.
-
-Ajoutez à `vnet.tf` :
+Le lab d'origine écrivait six blocs presque identiques. Ajoutez à `vnet.tf` :
 
 ```hcl
 locals {
@@ -136,7 +115,7 @@ locals {
   }
 
   public_subnets  = { for k, v in local.subnets : k => v if v.public }
-  private_subnets = { for k, v in local.subnets : k => v if !v.public }
+  private_subnets = ____   # ✏️ TODO 1 : les sous-réseaux NON publics
 }
 
 resource "azurerm_subnet" "main" {
@@ -147,22 +126,19 @@ resource "azurerm_subnet" "main" {
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = [each.value.cidr]
 
-  # Sous-réseaux privés : pas d'accès sortant implicite, la sortie passera par la NAT Gateway
+  # Privés : pas d'accès sortant implicite, la sortie passera par la NAT Gateway
   default_outbound_access_enabled = each.value.public
 }
 ```
 
-- `each.key` vaut `public-1`, `private-2`, etc. ; `each.value.cidr` la plage associée.
-- Les ressources sont adressées par clé : `azurerm_subnet.main["public-1"]`.
-- Les expressions `for ... if` filtrent la map pour obtenir les sous‑réseaux publics ou privés.
+> [!TIP]
+> Les ressources sont adressées par **clé** : `azurerm_subnet.main["public-1"]`. Testez dans `terraform console` : `local.public_subnets`, `keys(local.private_subnets)`.
 
 ---
 
-## Étape 3 : l'accès Internet des sous‑réseaux publics
+## Étape 3 — L'accès Internet des sous-réseaux publics
 
-Sur AWS, il fallait créer une Internet Gateway. Sur Azure, chaque sous‑réseau dispose déjà de **routes système**, dont `0.0.0.0/0 → Internet`. Une VM disposant d'une IP publique peut donc communiquer avec Internet sans ressource supplémentaire.
-
-Vérifiez‑le après l'`apply` de l'étape 5, sur une VM (lab 16) :
+Sur AWS, il fallait une Internet Gateway. Sur Azure, chaque sous-réseau dispose déjà de **routes système**, dont `0.0.0.0/0 → Internet` : une VM avec une IP publique communique avec Internet sans ressource supplémentaire. Vous le vérifierez au lab 16 :
 
 ```bash
 az network nic show-effective-route-table -g rg-<identity>-lab15 -n nic-web -o table
@@ -170,12 +146,11 @@ az network nic show-effective-route-table -g rg-<identity>-lab15 -n nic-web -o t
 
 ---
 
-## Étape 4 : la table de routage publique
+## Étape 4 — La table de routage publique
 
-Pour reproduire explicitement la logique du lab d'origine (et pouvoir plus tard la modifier, par exemple vers un pare‑feu), on crée une table de routage :
+Pour reproduire explicitement la logique du lab d'origine (et pouvoir plus tard router vers un pare-feu) :
 
 ```hcl
-# Table de routage des sous-réseaux publics
 resource "azurerm_route_table" "public" {
   name                = "rt-public"
   location            = azurerm_resource_group.rg.location
@@ -193,28 +168,15 @@ resource "azurerm_route_table" "public" {
 }
 ```
 
-Tout trafic dont la destination n'est pas dans le VNet (par exemple un site web) est envoyé vers Internet.
+## Étape 5 — L'associer aux sous-réseaux publics
+
+✏️ **TODO 2** — Écrivez `azurerm_subnet_route_table_association.public` avec un `for_each` sur `local.public_subnets` (arguments : `subnet_id`, `route_table_id`).
 
 ---
 
-## Étape 5 : associer la table de routage aux sous‑réseaux publics
+## Étape 6 — La NAT Gateway des sous-réseaux privés
 
-La table n'est prise en compte que si elle est **associée** aux sous‑réseaux. Un seul bloc `for_each` remplace les trois associations du lab d'origine :
-
-```hcl
-resource "azurerm_subnet_route_table_association" "public" {
-  for_each = local.public_subnets
-
-  subnet_id      = azurerm_subnet.main[each.key].id
-  route_table_id = azurerm_route_table.public.id
-}
-```
-
----
-
-## Étape 6 : la NAT Gateway des sous‑réseaux privés
-
-Les VM des sous‑réseaux privés n'ont pas d'IP publique. Pour qu'elles puissent sortir (mises à jour, appels d'API) sans être joignables depuis Internet, on ajoute une NAT Gateway :
+Créez `nat.tf` :
 
 ```hcl
 resource "azurerm_public_ip" "nat" {
@@ -239,18 +201,19 @@ resource "azurerm_nat_gateway_public_ip_association" "main" {
 }
 
 resource "azurerm_subnet_nat_gateway_association" "private" {
-  for_each = local.private_subnets
+  for_each = ____   # ✏️ TODO 3
 
   subnet_id      = azurerm_subnet.main[each.key].id
   nat_gateway_id = azurerm_nat_gateway.main.id
 }
 ```
 
-> **Coût :** la NAT Gateway est facturée à l'heure, même sans trafic. Détruisez‑la à la fin des labs 15 et 16.
+> [!WARNING]
+> **Coût :** la NAT Gateway est facturée à l'heure, même sans trafic. Détruisez-la à la fin du lab 16.
 
 ---
 
-## Étape 7 : outputs et déploiement
+## Étape 7 — Outputs et déploiement
 
 `outputs.tf` :
 
@@ -264,34 +227,52 @@ output "nat_public_ip" {
 }
 ```
 
-`terraform.tfvars` :
-
-```hcl
-identity = "<identity>"
-```
-
 ```bash
 terraform init
-terraform plan     # 18 to add
-terraform apply
+terraform plan
 ```
 
-Vérifiez :
+### 🔍 Observer
+
+✏️ **TODO 4** — Avant d'appliquer, **calculez** le nombre de ressources attendu (groupe, VNet, sous-réseaux, table, associations, IP, NAT…), puis comparez avec le plan.
 
 ```bash
+terraform apply
 az network vnet subnet list -g rg-<identity>-lab15 --vnet-name vnet-main \
   --query "[].{nom:name, plage:addressPrefix, routeTable:routeTable.id!=null, nat:natGateway.id!=null}" -o table
 ```
 
+> [!IMPORTANT]
 > **Ne détruisez pas** ce réseau : le lab 16 déploie une VM dedans.
 
-## Vérification
+---
 
-- [ ] Le VNet contient 6 sous‑réseaux.
-- [ ] Les 3 sous‑réseaux publics sont associés à `rt-public`.
-- [ ] Les 3 sous‑réseaux privés sont associés à `nat-main`.
+## ✅ Vérification
 
-## Pour aller plus loin
+- [ ] Le VNet contient 6 sous-réseaux.
+- [ ] Les 3 publics sont associés à `rt-public`, les 3 privés à `nat-main`.
+- [ ] `terraform plan` affiche `No changes`.
 
-- Remplacer le code par le module vérifié `Azure/avm-res-network-virtualnetwork/azurerm`.
-- Calculer les plages avec `cidrsubnet("10.0.0.0/16", 8, n)` au lieu de les écrire en dur.
+## 🧯 Si vous voyez…
+
+| Message | Cause | Solution |
+|---|---|---|
+| `NetcfgInvalidSubnet` / chevauchement | deux sous-réseaux sur la même plage | vérifiez les CIDR |
+| `Unsupported argument "default_outbound_access_enabled"` | provider azurerm trop ancien | `terraform init -upgrade` (≥ 4.0) |
+| `InUseSubnetCannotBeDeleted` au destroy | une VM du lab 16 utilise encore le subnet | détruisez tout le projet ensemble |
+
+## 🏆 Défi
+
+Remplacez les CIDR écrits en dur par un calcul : `cidrsubnet("10.0.0.0/16", 8, n)`. Construisez `local.subnets` avec deux expressions `for` (publics : n = 1 à 3, privés : n = 4 à 6) et vérifiez que le plan affiche **No changes**.
+
+## ❓ Questions de compréhension
+
+1. Pourquoi n'y a-t-il pas d'Internet Gateway sur Azure ?
+2. Qu'est-ce qui rend un sous-réseau « privé » dans ce lab ?
+3. Combien d'adresses utilisables dans un `/27` sur Azure ?
+4. Pourquoi un seul bloc `for_each` est-il préférable à six blocs `azurerm_subnet` ?
+
+## 🚀 Pour aller plus loin
+
+- Le module vérifié `Azure/avm-res-network-virtualnetwork/azurerm`.
+- **Azure Bastion** pour administrer les VM privées sans IP publique.

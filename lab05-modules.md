@@ -1,66 +1,95 @@
-# Lab 05 — Les modules
+# 🟪 Lab 05 — Les modules
 
-> **Durée :** 60 min · **Jour 1** · **Adapté de :** Lab 5 *Les Modules*
+![Durée](https://img.shields.io/badge/Durée-60_min-2563eb) ![Jour](https://img.shields.io/badge/Jour-1-16a34a) ![Fil rouge](https://img.shields.io/badge/Fil_rouge-suite-ea580c) ![Concepts](https://img.shields.io/badge/Concepts-module_·_moved_·_registry_·_tls-7c3aed)
 
-## Objectif
+## 🎯 Objectifs
 
-Organiser le code en **modules réutilisables** :
+À la fin de ce lab, vous serez capable de :
 
-- refactoriser la VM du fil rouge (IP publique, carte réseau, VM) dans un module local `server` ;
-- déplacer des ressources dans un module **sans les recréer**, grâce aux blocs `moved` ;
-- explorer le **Terraform Registry** et consommer un module public (`Azure/naming/azurerm`) ;
-- générer une paire de clés SSH et la transmettre au module `server` par ses variables d'entrée.
+- ✅ **refactoriser** l'IP publique, la carte réseau et la VM dans un module local `server` ;
+- ✅ **passer** des valeurs de la racine vers le module (variables) et du module vers la racine (outputs) ;
+- ✅ **déplacer** des ressources dans un module **sans les recréer** grâce aux blocs `moved` ;
+- ✅ **consommer** un module public du Terraform Registry (`Azure/naming/azurerm`) ;
+- ✅ **générer** une paire de clés SSH avec le provider `tls` et **expliquer** pourquoi la VM est recréée.
 
-## Schéma de l'objectif
+## 📋 Prérequis
+
+Lab 04 terminé : `terraform plan` affiche `No changes`.
+
+## 🗺️ Architecture
 
 ```mermaid
 flowchart TB
-    subgraph ROOT["Module racine · ~/terraform-azure/terraform"]
-        RG["azurerm_resource_group.rg"]
-        NET["VNet, subnet, NSG"]
-        KEY["tls_private_key.ssh"]
-        NAMING["module naming<br/>source Azure/naming/azurerm<br/>(Terraform Registry)"]
-        subgraph SRV["module server · source ./modules/server"]
-            PIP["azurerm_public_ip.web"]
-            NIC["azurerm_network_interface.web"]
-            VM["azurerm_linux_virtual_machine.web"]
+    subgraph ROOT["📁 Module racine · ~/terraform-azure/terraform"]
+        RG["azurerm_resource_group.rg"]:::net
+        NET["VNet · subnet · NSG"]:::net
+        KEY["tls_private_key.ssh"]:::sec
+        NAMING["module naming<br/>Azure/naming/azurerm<br/>(Terraform Registry)"]:::ext
+        subgraph SRV["📦 module server · ./modules/server"]
+            PIP["azurerm_public_ip.web"]:::net
+            NIC["azurerm_network_interface.web"]:::net
+            VM["azurerm_linux_virtual_machine.web"]:::compute
         end
     end
     RG -- "resource_group_name, location" --> SRV
     NET -- "subnet_id" --> SRV
     KEY -- "public_key, private_key" --> SRV
-    SRV -- "outputs public_ip, public_dns" --> OUT["outputs racine<br/>module.server.public_ip"]
-    KEY -- "local_sensitive_file" --> PEM["keys/identity.pem"]
+    SRV -- "outputs public_ip, public_dns" --> OUT["outputs racine<br/>module.server.public_ip"]:::tf
+    KEY -- "local_sensitive_file" --> PEM["keys/identity.pem"]:::sec
+    classDef tf fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef net fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef compute fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef sec fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef ext fill:#f1f5f9,stroke:#64748b,color:#0f172a
 ```
+
+> [!NOTE]
+> Un module est simplement **un répertoire de fichiers `.tf`**. Le répertoire où l'on lance `terraform` est le **module racine**. Un module ne voit **rien** de la racine : tout doit lui être passé par ses variables.
 
 ---
 
-## Tâche 1 : refactoriser le code dans un module local
+## Étape 1 — Refactoriser le serveur dans un module local
 
-Un module Terraform est simplement **un répertoire de fichiers `.tf`**. Le répertoire où l'on lance `terraform` est le **module racine**.
-
-### Étape 1.1 : créer l'arborescence
+### 1.1 L'arborescence
 
 ```bash
 cd ~/terraform-azure/terraform
 mkdir -p modules/server
-touch modules/server/{main.tf,variables.tf,outputs.tf}
+touch modules/server/{versions.tf,main.tf,variables.tf,outputs.tf}
 ```
 
 ```text
 terraform/
-├── main.tf
-├── variables.tf
-├── outputs.tf
-├── terraform.tfvars
+├── providers.tf  main.tf  variables.tf  outputs.tf  terraform.tfvars
 └── modules/
     └── server/
-        ├── main.tf
-        ├── variables.tf
-        └── outputs.tf
+        ├── versions.tf    ← providers requis par le module
+        ├── variables.tf   ← ENTRÉES du module
+        ├── main.tf        ← ressources
+        └── outputs.tf     ← SORTIES du module
 ```
 
-### Étape 1.2 : les variables du module
+### 1.2 Les providers requis par le module
+
+`modules/server/versions.tf` :
+
+```hcl
+terraform {
+  required_version = ">= 1.9"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+```
+
+> [!TIP]
+> Pas de bloc `provider` dans un module : il **hérite** du provider configuré à la racine.
+
+### 1.3 Les entrées du module
 
 `modules/server/variables.tf` :
 
@@ -102,66 +131,37 @@ variable "tags" {
 }
 ```
 
-### Étape 1.3 : les ressources du module
+### 1.4 Les ressources du module
 
-**Déplacez** (couper‑coller) les ressources `azurerm_public_ip.web`, `azurerm_network_interface.web` et `azurerm_linux_virtual_machine.web` de `main.tf` vers `modules/server/main.tf`, puis adaptez les références :
+**Coupez** `azurerm_public_ip.web`, `azurerm_network_interface.web` et `azurerm_linux_virtual_machine.web` de `main.tf` (racine) et **collez-les** dans `modules/server/main.tf`. Remplacez ensuite chaque référence à la racine par une variable :
 
-```hcl
-resource "azurerm_public_ip" "web" {
-  name                = "pip-web"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-  allocation_method   = "Static"
-  sku                 = "Standard"
-  domain_name_label   = "${var.identity}-web"
-}
-
-resource "azurerm_network_interface" "web" {
-  name                = "nic-web"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-
-  ip_configuration {
-    name                          = "internal"
-    subnet_id                     = var.subnet_id
-    private_ip_address_allocation = "Dynamic"
-    public_ip_address_id          = azurerm_public_ip.web.id
-  }
-}
-
-resource "azurerm_linux_virtual_machine" "web" {
-  name                  = "vm-web"
-  location              = var.location
-  resource_group_name   = var.resource_group_name
-  size                  = var.vm_size
-  admin_username        = var.admin_username
-  network_interface_ids = [azurerm_network_interface.web.id]
-
-  admin_ssh_key {
-    username   = var.admin_username
-    public_key = var.public_key
-  }
-
-  os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS"
-  }
-
-  source_image_reference {
-    publisher = "Canonical"
-    offer     = "ubuntu-24_04-lts"
-    sku       = "server"
-    version   = "latest"
-  }
-
-  tags = merge(var.tags, {
-    Identity = var.identity
-    Name     = "Student"
-  })
-}
+```diff
+ resource "azurerm_public_ip" "web" {
+   name                = "pip-web"
+-  location            = azurerm_resource_group.rg.location
+-  resource_group_name = azurerm_resource_group.rg.name
++  location            = var.location
++  resource_group_name = var.resource_group_name
 ```
 
-### Étape 1.4 : les outputs du module
+```diff
+   ip_configuration {
+     name                          = "internal"
+-    subnet_id                     = azurerm_subnet.web.id
++    subnet_id                     = var.subnet_id
+```
+
+```diff
+   admin_ssh_key {
+     username   = var.admin_username
+-    public_key = file("~/.ssh/id_rsa.pub")
++    public_key = var.public_key
+   }
+```
+
+✏️ **TODO 1** — Faites de même pour `location` et `resource_group_name` de la NIC et de la VM. `var.identity`, `var.vm_size`, `var.admin_username` et `var.tags` existent aussi dans le module : rien à changer pour eux.
+
+### 1.5 Les sorties du module
 
 `modules/server/outputs.tf` :
 
@@ -173,20 +173,25 @@ output "public_ip" {
 output "public_dns" {
   value = azurerm_public_ip.web.fqdn
 }
+
+output "private_ip" {
+  value = ____   # ✏️ TODO 2
+}
 ```
 
-### Étape 1.5 : appeler le module depuis la racine
+### 1.6 Appeler le module depuis la racine
 
-Dans `main.tf` (racine), à la place des trois ressources supprimées :
+Dans `main.tf` (racine), à la place des trois ressources :
 
 ```hcl
 module "server" {
   source = "./modules/server"
 
+  # nom_de_variable_du_module = valeur venant de la racine
   identity            = var.identity
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
-  subnet_id           = azurerm_subnet.web.id
+  subnet_id           = ____   # ✏️ TODO 3
   vm_size             = var.vm_size
   admin_username      = var.admin_username
   public_key          = file("~/.ssh/id_rsa.pub")
@@ -194,26 +199,12 @@ module "server" {
 }
 ```
 
-Dans `outputs.tf` (racine), les outputs lisent désormais le module :
+✏️ **TODO 4** — Dans `outputs.tf` (racine), faites lire les 4 outputs dans le module : `module.server.<output>`.
 
-```hcl
-output "public_ip" {
-  value = module.server.public_ip
-}
-
-output "public_dns" {
-  value = module.server.public_dns
-}
-```
-
-Supprimez les autres outputs qui référençaient directement la VM ou la NIC (ou faites‑les passer par le module).
-
-### Étape 1.6 : installer le module et observer le plan
-
-Même un module local doit être installé :
+### 1.7 🔍 Observer : le plan **sans** `moved`
 
 ```bash
-terraform init      # ou terraform get
+terraform init      # obligatoire, même pour un module local
 terraform plan
 ```
 
@@ -224,9 +215,10 @@ terraform plan
 Plan: 3 to add, 0 to change, 3 to destroy.
 ```
 
-Terraform voit des ressources **différentes** (leur adresse a changé) et veut les recréer. **N'appliquez pas !**
+> [!CAUTION]
+> **N'appliquez pas !** Pour Terraform, une nouvelle **adresse** = une nouvelle ressource. Il détruirait la VM pour en créer une identique.
 
-### Étape 1.7 : déplacer sans recréer avec `moved`
+### 1.8 Déplacer sans recréer avec `moved`
 
 Ajoutez dans `main.tf` (racine) :
 
@@ -237,8 +229,8 @@ moved {
 }
 
 moved {
-  from = azurerm_network_interface.web
-  to   = module.server.azurerm_network_interface.web
+  from = ____   # ✏️ TODO 5 : la carte réseau
+  to   = ____
 }
 
 moved {
@@ -253,41 +245,48 @@ terraform plan
 
 ```text
   # azurerm_linux_virtual_machine.web has moved to module.server.azurerm_linux_virtual_machine.web
-...
+    resource "azurerm_linux_virtual_machine" "web" { ... }
+
 Plan: 0 to add, 0 to change, 0 to destroy.
 ```
 
 ```bash
 terraform apply
+terraform state list     # les ressources sont préfixées par module.server.
 ```
 
-> Les blocs `moved` (Terraform ≥ 1.1) remplacent avantageusement `terraform state mv`, car le déplacement est **versionné avec le code**. On peut les supprimer une fois que tous les environnements ont été appliqués.
+> [!IMPORTANT]
+> Les blocs `moved` (Terraform ≥ 1.1) remplacent `terraform state mv` : le déplacement est **versionné avec le code** et s'applique à tous les environnements. On les supprime quand tous les états ont été migrés.
 
 ---
 
-## Tâche 2 : explorer le registre public des modules
+## Étape 2 — Le registre public des modules
 
-### Étape 2.1
+### 2.1 Explorer
 
-Ouvrez <https://registry.terraform.io/> et filtrez sur le provider **azurerm**. Repérez :
+Ouvrez <https://registry.terraform.io/>, filtrez sur le provider **azurerm** et repérez :
 
-- les modules **Azure Verified Modules** (préfixe `Azure/avm-res-…`), maintenus par Microsoft ;
-- le module **`Azure/naming/azurerm`**, qui génère des noms conformes aux règles de nommage Azure (longueur, caractères autorisés, unicité).
+- 🟦 les **Azure Verified Modules** (`Azure/avm-res-…`), maintenus par Microsoft ;
+- 🟩 **`Azure/naming/azurerm`**, qui calcule des noms conformes aux règles Azure (longueur, caractères, unicité).
 
-Pour chaque module, lisez les onglets **Readme**, **Inputs**, **Outputs** et **Resources**.
+Pour chaque module : onglets **Readme**, **Inputs**, **Outputs**, **Resources**.
 
-### Étape 2.2 : utiliser le module `naming`
+### 2.2 Utiliser le module `naming`
 
-Ajoutez dans `main.tf` :
+Dans `main.tf` :
 
 ```hcl
 module "naming" {
   source  = "Azure/naming/azurerm"
-  version = "~> 0.4"      # vérifiez la dernière version sur le registre
+  version = "~> 0.4"   # toujours épingler la version d'un module public
 
   suffix = [var.identity]
 }
+```
 
+Dans `outputs.tf` :
+
+```hcl
 output "noms_recommandes" {
   value = {
     resource_group  = module.naming.resource_group.name
@@ -302,30 +301,39 @@ terraform init      # télécharge le module dans .terraform/modules
 terraform apply
 ```
 
-> Ce module ne crée aucune ressource Azure : il ne fait que calculer des noms. On l'utilisera pour les nouveaux projets ; renommer les ressources existantes provoquerait leur recréation.
+### 🔍 Observer
+
+✏️ **TODO 6** — Le plan annonce quelques ressources à créer. Lesquelles ? Sont-elles visibles dans le portail Azure ?
+
+> [!WARNING]
+> N'utilisez pas ces noms pour renommer vos ressources existantes : un changement de `name` force leur recréation. Le module sert pour les **nouveaux** projets.
 
 ---
 
-## Tâche 3 : générer une clé SSH et la passer au module
+## Étape 3 — Générer une clé SSH et la passer au module
 
-Dans le lab d'origine, un module générait une paire de clés. Ici, on utilise le provider **`tls`** et on transmet le résultat au module `server`.
+### 3.1 Déclarer les providers
 
-### Étape 3.1 : déclarer les providers
+Dans `providers.tf`, complétez `required_providers` :
 
-Dans le bloc `terraform { required_providers { ... } }` de `main.tf` :
-
-```hcl
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
-    }
-    local = {
-      source  = "hashicorp/local"
-      version = "~> 2.5"
-    }
+```diff
+     azurerm = {
+       source  = "hashicorp/azurerm"
+       version = "~> 4.0"
+     }
++    tls = {
++      source  = "hashicorp/tls"
++      version = "~> 4.0"
++    }
++    local = {
++      source  = "hashicorp/local"
++      version = "~> 2.5"
++    }
 ```
 
-### Étape 3.2 : générer la clé
+### 3.2 Générer la clé
+
+Dans `main.tf` :
 
 ```hcl
 resource "tls_private_key" "ssh" {
@@ -340,11 +348,12 @@ resource "local_sensitive_file" "private_key" {
 }
 ```
 
-> **Attention :** la clé privée est stockée en clair dans le fichier d'état. Cette méthode est pratique en formation mais **ne doit pas être utilisée en production** (on y préfère Azure Key Vault ou une clé générée hors de Terraform).
+> [!CAUTION]
+> La clé privée est stockée **en clair dans le fichier d'état**. Pratique en formation, **interdit en production** (on préfère une clé générée hors de Terraform ou Azure Key Vault). Vérifiez que `keys/` est dans le `.gitignore`.
 
-### Étape 3.3 : passer la clé au module
+### 3.3 Passer la clé au module
 
-Dans `modules/server/variables.tf`, ajoutez :
+Dans `modules/server/variables.tf` :
 
 ```hcl
 variable "private_key" {
@@ -354,40 +363,64 @@ variable "private_key" {
 }
 ```
 
-Dans l'appel du module (`main.tf` racine) :
+Dans l'appel du module :
 
-```hcl
-module "server" {
-  source = "./modules/server"
-  # ... arguments existants ...
-  public_key  = tls_private_key.ssh.public_key_openssh
-  private_key = tls_private_key.ssh.private_key_pem
-}
+```diff
+ module "server" {
+   ...
+-  public_key          = file("~/.ssh/id_rsa.pub")
++  public_key          = tls_private_key.ssh.public_key_openssh
++  private_key         = tls_private_key.ssh.private_key_pem
+   tags                = var.tags
+ }
 ```
 
-La variable `private_key` sera utilisée au lab suivant.
+✏️ **TODO 7** — Mettez à jour l'output `ssh_command` pour qu'il utilise `-i keys/${var.identity}.pem`.
 
 ---
 
-## Tâche 4 : appliquer et observer
+## Étape 4 — Appliquer et observer
 
 ```bash
 terraform init
-terraform apply
+terraform plan
 ```
 
-La clé publique d'une VM Azure ne peut pas être modifiée sur place : le plan indique **`-/+ must be replaced`** pour `module.server.azurerm_linux_virtual_machine.web`. Confirmez.
+### 🔍 Observer
 
-Connectez‑vous avec la nouvelle clé :
+✏️ **TODO 8** — Quelle ressource est marquée `-/+` ? Quel attribut porte `# forces replacement` ? Notez le résumé du plan.
 
 ```bash
-ssh -i keys/<identity>.pem azureuser@$(terraform output -raw public_ip)
+terraform apply
+$(terraform output -raw ssh_command)
 ```
 
-Ajoutez `keys/` à votre `.gitignore`.
+---
 
-## Vérification
+## ✅ Vérification
 
-- [ ] `terraform state list` affiche les ressources préfixées par `module.server.`.
-- [ ] Le refactoring avec `moved` s'est fait sans destruction.
+- [ ] `terraform state list | grep module.server` affiche 3 ressources.
+- [ ] Le refactoring avec `moved` s'est fait avec **0 to destroy**.
 - [ ] La connexion SSH fonctionne avec `keys/<identity>.pem`.
+- [ ] `git status` (si dépôt) ne montre ni `keys/` ni `*.tfstate`.
+
+## 🧯 Si vous voyez…
+
+| Message | Cause | Solution |
+|---|---|---|
+| `Module not installed` | module ajouté sans `init` | `terraform init` |
+| `Unsupported argument "xxx"` dans `module "server"` | argument sans `variable` correspondante dans le module | déclarez-la dans `modules/server/variables.tf` |
+| `Reference to undeclared resource azurerm_subnet.web` (dans le module) | le module ne voit pas la racine | passez la valeur par une variable |
+| `Moved object still exists` | ressource encore présente à l'ancienne adresse dans le code | supprimez l'ancien bloc `resource` de la racine |
+| `Permission denied (publickey)` | ancienne clé utilisée | `ssh -i keys/<identity>.pem …` |
+
+## 🏆 Défi
+
+Ajoutez au module une variable `name_suffix` (défaut `"web"`) utilisée dans les noms `pip-${var.name_suffix}`, `nic-…`, `vm-…`. Avec la valeur par défaut, le plan doit afficher **No changes**. Pourquoi ?
+
+## ❓ Questions de compréhension
+
+1. Pourquoi faut-il relancer `terraform init` après avoir ajouté un module local ?
+2. Comment une valeur passe-t-elle d'un module A à un module B ?
+3. Quelle différence entre `moved` et `terraform state mv` ?
+4. Pourquoi changer la clé publique recrée-t-il la VM ?

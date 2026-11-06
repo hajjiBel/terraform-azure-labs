@@ -1,39 +1,48 @@
-# Lab 07 — Les commandes Terraform
+# 🟪 Lab 07 — Commandes Terraform, dérive (drift) et plan enregistré
 
-> **Durée :** 30 min · **Jour 1** · **Adapté de :** Lab 7 *Terraform Commands*
+![Durée](https://img.shields.io/badge/Durée-60_min-2563eb) ![Jour](https://img.shields.io/badge/Jour-1-16a34a) ![Fil rouge](https://img.shields.io/badge/Fil_rouge-suite-ea580c) ![Concepts](https://img.shields.io/badge/Concepts-console_·_graph_·_state_·_refresh--only_·_plan_--out-7c3aed)
 
-## Objectif
+## 🎯 Objectifs
 
-Maîtriser les commandes d'inspection et de maintenance du quotidien :
+À la fin de ce lab, vous serez capable de :
 
-- `terraform console` pour évaluer des expressions sur l'état courant ;
-- `terraform graph` pour visualiser le graphe de dépendances ;
-- `terraform show`, `output`, `state list` et `state show` pour lire l'état ;
-- `terraform apply -replace` pour reconstruire une ressource ;
-- `terraform fmt` et `terraform validate` pour garder un code propre.
+- ✅ **évaluer** des expressions et tester des fonctions avec `terraform console` ;
+- ✅ **visualiser** le graphe de dépendances avec `terraform graph` ;
+- ✅ **inspecter** l'état avec `show`, `state list`, `state show` et `output` ;
+- ✅ **détecter** une modification faite hors de Terraform (**dérive**), la **lire** avec `plan -refresh-only` et **choisir** entre restaurer, adopter ou ignorer ;
+- ✅ **enregistrer** un plan (`plan -out`) et **appliquer exactement** ce plan ;
+- ✅ **garder** un code propre avec `fmt` et `validate`.
 
-## Schéma de l'objectif
+## 📋 Prérequis
+
+Lab 06 terminé : le serveur web répond.
+
+## 🗺️ Architecture
 
 ```mermaid
 flowchart LR
-    CODE["Code .tf"] --> FMT["terraform fmt<br/>mise en forme"]
-    CODE --> VAL["terraform validate<br/>syntaxe et types"]
-    CODE --> GRAPH["terraform graph<br/>graphe DOT"]
-    STATE[("terraform.tfstate")] --> SHOW["terraform show"]
-    STATE --> OUT["terraform output"]
-    STATE --> LIST["terraform state list / show"]
-    STATE --> CONS["terraform console"]
-    STATE --> REP["terraform apply -replace"]
-    REP --> AZ["Azure : VM recréée"]
+    CODE["📄 Code .tf"]:::tf --> FMT["terraform fmt"]:::tf
+    CODE --> VAL["terraform validate"]:::tf
+    CODE --> GRAPH["terraform graph"]:::tf
+    STATE[("🗄️ terraform.tfstate")]:::state --> SHOW["show · state list/show · output"]:::state
+    STATE --> CONS["terraform console"]:::state
+    AZ["☁️ Azure réel"]:::net -- "modifié à la main 🖐️" --> DRIFT{{"Dérive"}}:::replace
+    DRIFT --> RO["plan -refresh-only"]:::sec
+    RO --> D1["🟩 restaurer : apply"]:::compute
+    RO --> D2["🟦 adopter : modifier le code"]:::net
+    RO --> D3["🟧 ignorer : ignore_changes (lab 09)"]:::sec
+    CODE --> PLAN["plan -out=tfplan"]:::tf --> APPLY["apply tfplan"]:::compute
+    classDef tf fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef net fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef compute fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef sec fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef state fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef replace fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
 ```
 
 ---
 
-## Tâche 1 : la console Terraform
-
-Les configurations utilisent sans cesse des expressions comme `azurerm_resource_group.rg.location`. La console les évalue sur l'état actuel.
-
-### Étape 1.1
+## Étape 1 — La console
 
 ```bash
 cd ~/terraform-azure/terraform
@@ -53,118 +62,202 @@ tolist([
 "10.0.2.0/24"
 > upper(var.identity)
 "STUDENT01"
+> merge(var.tags, { Name = "Web" })
 ```
 
-Quittez avec `Ctrl+C` ou `exit`.
+✏️ **TODO 1** — Dans la console, calculez les **trois** premiers sous-réseaux `/24` de `10.0.0.0/16` en **une seule** expression (indice : `[for i in range(…) : …]`).
 
-> La console est idéale pour **tester des fonctions** (`cidrsubnet`, `merge`, `lookup`, `format`…) avant de les écrire dans le code.
-
-### Étape 1.2 : utiliser l'entrée standard
+Quittez avec `exit`. Mode non interactif :
 
 ```bash
-echo "azurerm_resource_group.rg.id" | terraform console
+echo 'module.server.public_dns' | terraform console
 ```
 
 ---
 
-## Tâche 2 : le graphe de dépendances
-
-### Étape 2.1
+## Étape 2 — Le graphe de dépendances
 
 ```bash
-terraform graph
+terraform graph > graph.dot
+sudo apt-get install -y graphviz && dot -Tsvg graph.dot > graph.svg   # ou https://dreampuf.github.io/GraphvizOnline/
+```
+
+✏️ **TODO 2** — Retrouvez dans le graphe la chaîne : groupe de ressources → ____ → ____ → module `server` (NIC → VM).
+
+---
+
+## Étape 3 — Lire l'état
+
+```bash
+terraform show | less
+terraform state list
+terraform state show module.server.azurerm_linux_virtual_machine.web
+terraform output -json | jq
+```
+
+> [!CAUTION]
+> Ne modifiez **jamais** `terraform.tfstate` à la main. Pour retirer ou déplacer une ressource : blocs `removed` / `moved`, ou `terraform state rm` / `state mv` en dernier recours.
+
+---
+
+## Étape 4 — 🔥 La dérive (drift)
+
+Un collègue modifie l'infrastructure **sans passer par Terraform**. Simulez-le :
+
+```bash
+RG="rg-$(terraform console <<< 'var.identity' | tr -d '"')-lab"
+
+# 1. Un tag ajouté "à la main" sur la VM
+az vm update -g "$RG" -n vm-web --set tags.Owner=collegue -o none
+
+# 2. Une règle NSG supprimée "à la main"
+az network nsg rule delete -g "$RG" --nsg-name nsg-web -n Allow-HTTP
+curl -m 5 $(terraform output -raw url)     # le site ne répond plus 😱
+```
+
+### 4.1 🔍 Observer : ce que voit `plan`
+
+```bash
+terraform plan
 ```
 
 ```text
-digraph G {
-  rankdir = "RL";
-  node [shape = rect, fontname = "sans-serif"];
-  "azurerm_resource_group.rg" [label="azurerm_resource_group.rg"];
+Note: Objects have changed outside of Terraform
+
+Terraform detected the following changes made outside of Terraform since the
+last "terraform apply" which may have affected this plan:
+
+  # module.server.azurerm_linux_virtual_machine.web has changed
+  ~ resource "azurerm_linux_virtual_machine" "web" {
+      ~ tags = {
+          + "Owner" = "collegue"
+        }
+    }
+  # azurerm_network_security_group.web has changed
   ...
-}
 ```
 
-### Étape 2.2 : le visualiser
+✏️ **TODO 3** — Puis, sous `Terraform will perform the following actions`, que propose Terraform pour **chacune** des deux modifications ? Notez le résumé.
 
-Collez la sortie dans <https://dreampuf.github.io/GraphvizOnline/>, ou générez une image si Graphviz est installé :
+### 4.2 Lire la dérive seule : `-refresh-only`
 
 ```bash
-sudo apt-get install -y graphviz
-terraform graph | dot -Tsvg > graph.svg
+terraform plan -refresh-only     # montre UNIQUEMENT la dérive, ne propose aucune action
 ```
 
-Identifiez la chaîne de dépendances : groupe de ressources → VNet → subnet → module `server` (NIC → VM).
+| Commande | Compare | Écrit l'état ? | Modifie Azure ? |
+|---|---|---|---|
+| `terraform plan` | code ⟷ réalité | non | non |
+| `terraform plan -refresh-only` | état ⟷ réalité | non | non |
+| `terraform apply -refresh-only` | état ⟷ réalité | 🟪 **oui** | non |
+| `terraform apply` | code ⟷ réalité | oui | 🟥 **oui** |
+
+### 4.3 Décider
+
+| Décision | Quand | Action |
+|---|---|---|
+| 🟩 **Restaurer** | la modification manuelle est une erreur | `terraform apply` |
+| 🟦 **Adopter** | la modification doit être conservée | l'écrire dans le code, puis `plan` → `No changes` |
+| 🟧 **Ignorer** | l'attribut est géré par quelqu'un d'autre | `lifecycle { ignore_changes = [...] }` (lab 09) |
+
+✏️ **TODO 4** — Ici, la règle HTTP supprimée est une erreur : **restaurez-la**. Le tag `Owner` est légitime : **adoptez-le** pour la VM uniquement.
+
+<details>
+<summary>💡 Indice pour adopter le tag</summary>
+
+Dans l'appel du module : `tags = merge(var.tags, { Owner = "collegue" })`. Pourquoi ce tag n'apparaîtra-t-il pas sur le groupe de ressources ?
+
+</details>
+
+```bash
+terraform apply
+terraform plan                          # ✅ No changes
+curl $(terraform output -raw url)       # ✅ le site répond
+```
+
+> [!IMPORTANT]
+> `terraform apply -refresh-only` **accepte** la dérive dans l'état, mais **ne change pas le code** : au `plan` suivant, Terraform proposera à nouveau de revenir à ce que dit le code.
 
 ---
 
-## Tâche 3 : afficher les informations de l'infrastructure
+## Étape 5 — Le plan enregistré
 
-Le fichier `terraform.tfstate` est du JSON. Pour une lecture plus confortable :
+En équipe et en CI/CD, on **relit** un plan, puis on applique **exactement** ce plan.
 
 ```bash
-terraform show
-terraform show | grep ip_address
+terraform plan -var="vm_size=Standard_B1ms" -out=tfplan
+terraform show tfplan            # relecture (format lisible)
+terraform show -json tfplan | jq '.resource_changes[] | {adresse: .address, actions: .change.actions}'
 ```
 
-Lister et inspecter les ressources gérées :
+### 🔍 Observer : un plan devenu obsolète
+
+Dans **un second terminal** (même répertoire, `source ~/.azure-tf.env`), modifiez l'état :
 
 ```bash
-terraform state list
-terraform state show module.server.azurerm_linux_virtual_machine.web
+terraform apply -auto-approve -var='tags={Environment="Training", Demo="stale"}'   # change les tags → nouvel état (serial +1)
+```
+
+Revenez au premier terminal :
+
+```bash
+terraform apply tfplan
+```
+
+✏️ **TODO 5** — Quel message obtenez-vous ? Pourquoi est-ce une protection ?
+
+```bash
+rm tfplan             # tfplan est dans le .gitignore : il peut contenir des valeurs sensibles
+terraform apply       # retire le tag Demo : retour à la configuration du code
 ```
 
 ---
 
-## Tâche 4 : afficher les outputs
+## Étape 6 — Reconstruire une ressource
 
 ```bash
-terraform output
-terraform output -json
-```
-
----
-
-## Tâche 5 : marquer une ressource pour reconstruction
-
-Si une VM est défaillante, `terraform plan` ne propose rien : la configuration correspond à l'état. Pour forcer sa recréation :
-
-```bash
-# Prévisualiser
 terraform plan -replace="module.server.azurerm_linux_virtual_machine.web"
-
-# Appliquer
-terraform apply -replace="module.server.azurerm_linux_virtual_machine.web"
+terraform plan -replace="azurerm_linux_virtual_machine.web"    # adresse fausse : que se passe-t-il ?
 ```
 
-> `terraform taint <adresse>` existe toujours mais est **déprécié** : `-replace` montre l'effet dans le plan avant d'agir et ne modifie pas l'état à l'avance.
-
-Testez l'erreur quand l'adresse est absente ou fausse :
-
-```bash
-terraform plan -replace="azurerm_linux_virtual_machine.web"
-```
-
-Le message indique que la ressource n'existe pas à cette adresse : depuis le lab 05, elle est dans `module.server`.
+> [!NOTE]
+> `terraform taint` existe toujours mais est **déprécié** : `-replace` montre l'effet **dans le plan** avant d'agir et ne modifie pas l'état à l'avance.
 
 ---
 
-## Tâche 6 : formater et valider le code
+## Étape 7 — Formater et valider
 
 ```bash
-# Réécrit les fichiers au format canonique (indentation de 2 espaces, alignement des =)
-terraform fmt -recursive
-
-# En CI : vérifier sans modifier (code retour ≠ 0 si un fichier est mal formaté)
-terraform fmt -check -recursive
-
-# Vérifier la cohérence syntaxique et les types
+terraform fmt -recursive          # réécrit au format canonique
+terraform fmt -check -recursive   # en CI : code retour ≠ 0 si mal formaté
 terraform validate
 ```
 
-C'est un moyen simple de s'assurer que le formatage est correct avant de valider ses modifications dans Git.
+---
 
-## Vérification
+## ✅ Vérification
 
-- [ ] Vous savez retrouver l'IP de la VM de trois façons différentes (`console`, `show`, `output`).
-- [ ] Vous avez généré et lu le graphe de dépendances.
-- [ ] `terraform fmt -check -recursive` et `terraform validate` passent sans erreur.
+- [ ] Vous savez retrouver l'IP de la VM de trois façons (`console`, `state show`, `output`).
+- [ ] Après la dérive, `terraform plan` affiche `No changes` et le site répond.
+- [ ] Le tag `Owner = collegue` est présent sur la VM **et** dans le code.
+- [ ] `terraform fmt -check -recursive` et `terraform validate` passent.
+
+## 🧯 Si vous voyez…
+
+| Message | Cause | Solution |
+|---|---|---|
+| `Saved plan is stale` | l'état a changé depuis le `plan -out` | refaites `plan -out` |
+| `Error acquiring the state lock` | une autre commande tourne sur ce state | attendez la fin de l'autre terminal |
+| `Warning: Resource targeting is in effect` | `-target` / `-replace` partiel | normal ; ne pas en faire une habitude |
+| `Invalid character` dans la console | guillemets typographiques copiés | retapez `"` au clavier |
+
+## 🏆 Défi
+
+Supprimez **à la main** l'association NSG ↔ subnet (`az network vnet subnet update -g "$RG" --vnet-name vnet-<identity> -n snet-web --nsg ""`). Que propose `terraform plan` ? Et `terraform plan -refresh-only` ?
+
+## ❓ Questions de compréhension
+
+1. Quelle différence entre `terraform plan` et `terraform plan -refresh-only` ?
+2. Après un `apply -refresh-only`, pourquoi le `plan` suivant propose-t-il encore des changements ?
+3. Pourquoi applique-t-on un **fichier de plan** plutôt qu'un nouveau `apply` en CI/CD ?
+4. Que fait `terraform fmt -check` et pourquoi l'utiliser en CI ?

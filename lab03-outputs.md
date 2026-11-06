@@ -1,30 +1,43 @@
-# Lab 03 — Les outputs
+# 🟩 Lab 03 — Les outputs
 
-> **Durée :** 20 min · **Jour 1** · **Adapté de :** Lab 3 *Outputs*
+![Durée](https://img.shields.io/badge/Durée-20_min-2563eb) ![Jour](https://img.shields.io/badge/Jour-1-16a34a) ![Fil rouge](https://img.shields.io/badge/Fil_rouge-suite-ea580c) ![Concepts](https://img.shields.io/badge/Concepts-output_·_sensitive_·_interpolation-7c3aed)
 
-## Objectif
+## 🎯 Objectifs
 
-Exposer des valeurs précises de l'infrastructure (IP publique, nom DNS) avec des blocs `output`, plutôt que de les chercher dans la sortie de `terraform show`. Les outputs servent aussi à **transmettre des valeurs** entre modules (lab 05) et entre projets (labs 10 et 11).
+À la fin de ce lab, vous serez capable de :
 
-## Schéma de l'objectif
+- ✅ **déclarer** des blocs `output` pour exposer l'IP publique, le DNS et l'IP privée ;
+- ✅ **interroger** les outputs en texte, en brut (`-raw`) et en JSON (`-json`) ;
+- ✅ **construire** une valeur par interpolation de chaîne `"${...}"` ;
+- ✅ **masquer** une valeur avec `sensitive = true` et **expliquer** ce que cela protège (et ne protège pas).
+
+## 📋 Prérequis
+
+Lab 02 déployé dans `~/terraform-azure/terraform`.
+
+## 🗺️ Architecture
 
 ```mermaid
 flowchart LR
-    subgraph State["terraform.tfstate"]
-        PIP["azurerm_public_ip.web<br/>ip_address = 20.x.x.x<br/>fqdn = identity-web.francecentral.cloudapp.azure.com"]
+    subgraph State["🗄️ terraform.tfstate"]
+        PIP["azurerm_public_ip.web<br/>ip_address = 20.x.x.x<br/>fqdn = identity-web.francecentral.cloudapp.azure.com"]:::state
+        VM["azurerm_linux_virtual_machine.web<br/>private_ip_address = 10.0.1.4"]:::state
     end
-    PIP --> O1["output public_ip"]
-    PIP --> O2["output public_dns"]
-    O1 --> CLI["terraform output"]
-    O2 --> CLI
-    CLI --> U["ssh / navigateur / scripts"]
+    PIP --> O1["output public_ip"]:::tf
+    PIP --> O2["output public_dns"]:::tf
+    VM --> O3["output private_ip"]:::tf
+    PIP --> O4["output ssh_command"]:::tf
+    O1 & O2 & O3 & O4 --> CLI["terraform output"]:::ext --> U["ssh · navigateur · scripts · CI"]:::ext
+    classDef tf fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef state fill:#f3e8ff,stroke:#9333ea,color:#581c87
+    classDef ext fill:#f1f5f9,stroke:#64748b,color:#0f172a
 ```
 
 ---
 
-## Tâche 1 : créer des outputs
+## Étape 1 — Créer les outputs
 
-Dans le répertoire `~/terraform-azure/terraform`, créez un fichier `outputs.tf` :
+Dans `~/terraform-azure/terraform`, créez `outputs.tf` :
 
 ```hcl
 output "public_ip" {
@@ -38,58 +51,95 @@ output "public_dns" {
 }
 ```
 
-> Sur AWS, ces attributs étaient portés par l'instance (`aws_instance.web.public_ip`). Sur Azure, ils sont portés par la ressource **IP publique**. La VM expose aussi `azurerm_linux_virtual_machine.web.public_ip_address`.
-
-### Étape 1.2 : mettre à jour l'état sans toucher l'infrastructure
+> [!NOTE]
+> Sur AWS, ces attributs étaient portés par l'instance (`aws_instance.web.public_ip`). Sur Azure, ils sont portés par la ressource **IP publique**. La VM expose aussi `public_ip_address` et `private_ip_address`.
 
 ```bash
-terraform apply -refresh-only
+terraform apply
 ```
 
-> `terraform refresh`, utilisé dans le lab d'origine, est **déprécié**. `apply -refresh-only` affiche les écarts détectés et demande une confirmation avant d'écrire l'état.
+### 🔍 Observer
 
-Un simple `terraform apply` fonctionne aussi : ajouter un output ne modifie aucune ressource.
+```text
+Changes to Outputs:
+  + public_dns = "student01-web.francecentral.cloudapp.azure.com"
+  + public_ip  = "20.x.x.x"
+
+You can apply this plan to save these new output values to the Terraform state,
+without changing any real infrastructure.
+```
+
+Ajouter un output **ne modifie aucune ressource** : seul l'état est mis à jour.
 
 ---
 
-## Tâche 2 : interroger les outputs
+## Étape 2 — Interroger les outputs
 
 ```bash
-# Tous les outputs
-terraform output
-
-# Un output précis
-terraform output public_dns
-
-# Valeur brute, sans guillemets (pratique dans un script)
-terraform output -raw public_ip
-
-# Format JSON (pour jq, la CI…)
-terraform output -json
-```
-
-Utilisation directe dans une commande :
-
-```bash
+terraform output                 # tous
+terraform output public_dns      # un seul (avec guillemets)
+terraform output -raw public_ip  # brut, idéal dans un script
+terraform output -json           # pour jq ou la CI
 ssh azureuser@$(terraform output -raw public_ip)
 ```
 
 ---
 
-## Exercice
+## Étape 3 — Exercices
 
-1. Ajoutez un output `private_ip` avec l'adresse IP privée de la VM (attribut `private_ip_address` de la VM ou de la carte réseau).
-2. Ajoutez un output `ssh_command` qui affiche la commande SSH complète, en utilisant l'interpolation de chaîne :
+✏️ **TODO 1** — Ajoutez un output `private_ip` :
 
 ```hcl
-output "ssh_command" {
-  value = "ssh azureuser@${azurerm_public_ip.web.ip_address}"
+output "private_ip" {
+  description = "Adresse IP privée de la VM"
+  value       = ____   # attribut de la VM
 }
 ```
 
-3. Ajoutez `sensitive = true` à un output et observez son affichage avec `terraform output`, puis avec `terraform output -raw <nom>`.
+✏️ **TODO 2** — Ajoutez un output `ssh_command` qui affiche la commande SSH complète par **interpolation** :
 
-## Vérification
+```hcl
+output "ssh_command" {
+  value = "ssh azureuser@____"   # insérez l'IP publique avec ${...}
+}
+```
+
+✏️ **TODO 3** — Ajoutez `sensitive = true` à `ssh_command`, puis comparez :
+
+```bash
+terraform apply
+terraform output                  # que voyez-vous ?
+terraform output -raw ssh_command # et ici ?
+grep -A3 '"ssh_command"' terraform.tfstate
+```
+
+> [!WARNING]
+> `sensitive = true` masque la valeur **à l'écran** (plan, apply, `terraform output`). Elle reste **en clair dans le fichier d'état**. Protéger l'état est donc indispensable (lab 11).
+
+Retirez `sensitive = true` avant de continuer.
+
+---
+
+## ✅ Vérification
 
 - [ ] `terraform output` affiche `public_ip`, `public_dns`, `private_ip` et `ssh_command`.
-- [ ] La commande `ssh $(terraform output -raw ...)` fonctionne.
+- [ ] `$(terraform output -raw ssh_command)` vous connecte à la VM.
+- [ ] `terraform plan` affiche `No changes`.
+
+## 🧯 Si vous voyez…
+
+| Message | Cause | Solution |
+|---|---|---|
+| `Warning: No outputs found` | outputs déclarés mais pas encore appliqués | `terraform apply` |
+| `Reference to undeclared resource` | faute dans le nom local (`web`) | `terraform state list` pour retrouver l'adresse |
+| `Output refers to sensitive values` | output dérivé d'une valeur sensible | ajoutez `sensitive = true` à l'output |
+
+## 🏆 Défi
+
+Créez un output `url` qui vaut `http://<fqdn>` et ouvrez-le avec `xdg-open $(terraform output -raw url)`. Le serveur web n'existe pas encore : quelle erreur obtenez-vous ? (Réponse au lab 06.)
+
+## ❓ Questions de compréhension
+
+1. Pourquoi l'ajout d'un output ne crée-t-il aucune ressource ?
+2. Quelle option de `terraform output` utiliser dans un script shell ? Pourquoi ?
+3. Une valeur marquée `sensitive` est-elle chiffrée dans l'état ?

@@ -1,39 +1,42 @@
-# Lab 06 — Provisioners
+# 🟩 Lab 06 — Provisioners et cloud-init
 
-> **Durée :** 45 min · **Jour 1** · **Adapté de :** Lab 6 *Provisioners*
+![Durée](https://img.shields.io/badge/Durée-45_min-2563eb) ![Jour](https://img.shields.io/badge/Jour-1-16a34a) ![Fil rouge](https://img.shields.io/badge/Fil_rouge-suite-ea580c) ![Concepts](https://img.shields.io/badge/Concepts-connection_·_file_·_remote--exec_·_custom__data-7c3aed)
 
-## Objectif
+## 🎯 Objectifs
 
-Configurer la VM **après sa création** :
+À la fin de ce lab, vous serez capable de :
 
-- définir un bloc `connection` SSH à partir de la clé générée au lab 05 ;
-- copier des fichiers avec le provisioner `file` et exécuter des commandes avec `remote-exec` ;
-- comprendre que les provisioners ne s'exécutent **qu'à la création**, et forcer une recréation avec `terraform apply -replace` ;
-- comparer avec l'approche recommandée sur Azure : `custom_data` (cloud-init).
+- ✅ **définir** un bloc `connection` SSH à partir de la clé générée au lab 05 ;
+- ✅ **copier** des fichiers (`file`) et **exécuter** des commandes (`remote-exec`) sur la VM ;
+- ✅ **expliquer** pourquoi un provisioner ne s'exécute **qu'à la création** et **forcer** sa ré-exécution avec `-replace` ;
+- ✅ **comparer** les provisioners avec `custom_data` (cloud-init), l'approche recommandée sur Azure.
 
-## Schéma de l'objectif
+## 📋 Prérequis
+
+Lab 05 terminé (module `server`, clé `keys/<identity>.pem`).
+
+## 🗺️ Architecture
 
 ```mermaid
 sequenceDiagram
-    participant TF as Terraform (poste)
-    participant ARM as Azure Resource Manager
-    participant VM as VM vm-web (Ubuntu)
+    autonumber
+    participant TF as 🟪 Terraform (poste)
+    participant ARM as 🟦 Azure Resource Manager
+    participant VM as 🟩 VM vm-web (Ubuntu)
     TF->>ARM: Créer la VM
     ARM-->>TF: VM créée (IP publique)
     TF->>VM: connection SSH (azureuser + clé privée)
-    TF->>VM: provisioner "file" : assets/ vers /tmp/assets
-    TF->>VM: provisioner "remote-exec" : sudo sh /tmp/assets/setup-web.sh
-    VM-->>TF: Apache installé
+    TF->>VM: provisioner "file" : assets/ → /tmp/assets
+    TF->>VM: provisioner "remote-exec" : sudo bash /tmp/assets/setup-web.sh
+    VM-->>TF: Apache installé ✅
     Note over VM: http://identity-web.francecentral.cloudapp.azure.com
 ```
 
 ---
 
-## Tâche 1 : créer un bloc de connexion
+## Étape 1 — Le bloc de connexion
 
-### Étape 1.1
-
-Dans `modules/server/main.tf`, ajoutez un bloc `connection` dans la ressource `azurerm_linux_virtual_machine.web`, sous les tags :
+Dans `modules/server/main.tf`, à la fin de la ressource `azurerm_linux_virtual_machine.web` :
 
 ```hcl
 resource "azurerm_linux_virtual_machine" "web" {
@@ -42,79 +45,71 @@ resource "azurerm_linux_virtual_machine" "web" {
   connection {
     type        = "ssh"
     user        = var.admin_username
-    private_key = var.private_key
+    private_key = ____   # ✏️ TODO 1 : la variable créée au lab 05
     host        = self.public_ip_address
   }
 }
 ```
 
-- La variable `private_key` a été ajoutée au lab précédent.
-- `self` désigne la ressource en cours de définition : `self.public_ip_address` est l'IP publique de **cette** VM.
+> [!NOTE]
+> `self` désigne la ressource en cours de définition : `self.public_ip_address` est l'IP publique de **cette** VM. On ne peut pas écrire `azurerm_linux_virtual_machine.web.public_ip_address` à l'intérieur d'elle-même (cycle).
 
 ---
 
-## Tâche 2 : copier et exécuter un script
+## Étape 2 — Copier et exécuter un script
 
-### Étape 2.1 : provisioner `file`
+### 2.1 Le script
 
-Il s'exécute après la création de la VM et copie le répertoire `assets`. Ajoutez‑le après le bloc `connection` :
+Créez `assets/setup-web.sh` **à la racine** du projet :
+
+```bash
+#!/bin/bash
+set -e
+apt-get update
+apt-get install -y apache2
+systemctl enable --now apache2
+echo "<html><h1>Bienvenue sur Apache, déployé par Terraform sur Azure</h1><p>$(hostname)</p></html>" > /var/www/html/index.html
+```
+
+### 2.2 Les provisioners
+
+Ajoutez **dans** la ressource VM, après `connection` :
 
 ```hcl
   provisioner "file" {
     source      = "${path.root}/assets"
     destination = "/tmp/"
   }
-```
 
-### Étape 2.2 : provisioner `remote-exec`
-
-Ajoutez‑le après le provisioner `file` :
-
-```hcl
   provisioner "remote-exec" {
     inline = [
       "cloud-init status --wait > /dev/null",   # attendre la fin du démarrage (verrou apt)
-      "sudo sh /tmp/assets/setup-web.sh",
+      "____",                                    # ✏️ TODO 2 : exécuter le script avec sudo
     ]
   }
 ```
 
-Les deux provisioners doivent se trouver **dans** le bloc `azurerm_linux_virtual_machine`.
-
-### Étape 2.3 : le script
-
-Créez `assets/setup-web.sh` à la racine du projet :
-
-```bash
-#!/bin/bash
-apt-get update
-apt-get install -y apache2
-systemctl start apache2
-systemctl enable apache2
-echo "<html><h1>Bienvenue sur Apache, déployé par Terraform sur Azure</h1><p>$(hostname)</p></html>" > /var/www/html/index.html
-```
+> [!TIP]
+> `path.root` = répertoire du module racine ; `path.module` = répertoire du module courant. Ici, `assets/` est à la racine.
 
 ---
 
-## Tâche 3 : appliquer et observer la connexion distante
+## Étape 3 — Appliquer et observer
 
-### Étape 3.1 : les provisioners ne déclenchent rien seuls
+### 3.1 🔍 Observer : les provisioners ne déclenchent rien seuls
 
 ```bash
 terraform apply
 ```
 
-```text
-Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
-```
+✏️ **TODO 3** — Notez le résumé. Pourquoi la VM n'est-elle pas recréée ?
 
-Ajouter ou retirer un provisioner **ne modifie pas** la ressource : Terraform ne recrée pas la VM.
+### 3.2 Forcer la recréation
 
-### Étape 3.2 : forcer la recréation
-
-Le lab d'origine utilisait `terraform taint`, aujourd'hui déprécié. On utilise `-replace` :
+`terraform taint` est déprécié : on utilise `-replace`.
 
 ```bash
+terraform plan  -replace="module.server.azurerm_linux_virtual_machine.web"   # prévisualiser
 terraform apply -replace="module.server.azurerm_linux_virtual_machine.web"
 ```
 
@@ -124,111 +119,56 @@ module.server.azurerm_linux_virtual_machine.web: Provisioning with 'remote-exec'
 module.server.azurerm_linux_virtual_machine.web (remote-exec): Connecting to remote host via SSH...
 module.server.azurerm_linux_virtual_machine.web (remote-exec):   Host: 20.x.x.x
 module.server.azurerm_linux_virtual_machine.web (remote-exec):   User: azureuser
-module.server.azurerm_linux_virtual_machine.web (remote-exec):   Private key: true
 module.server.azurerm_linux_virtual_machine.web (remote-exec): Connected!
 ...
 Apply complete! Resources: 1 added, 0 changed, 1 destroyed.
 ```
 
-### Étape 3.3 : tester
+### 3.3 Tester
 
-```bash
-curl http://$(terraform output -raw public_dns)
+Ajoutez dans `outputs.tf` (racine) :
+
+```hcl
+output "url" {
+  value = "http://${module.server.public_dns}"
+}
 ```
 
-Ou ouvrez l'URL dans un navigateur. Vous pouvez aussi vous connecter :
-
 ```bash
-ssh -i keys/<identity>.pem azureuser@$(terraform output -raw public_dns)
+terraform apply
+curl $(terraform output -raw url)
 ```
 
-> Si un provisioner échoue, la ressource est marquée **tainted** et sera recréée au prochain `apply`.
+> [!WARNING]
+> Si un provisioner **échoue**, la ressource est marquée **tainted** : elle sera **recréée** au prochain `apply`.
 
 ---
 
-## Exercice : provisioning avec une clé fournie et Nginx
+## Exercice — Provisioning avec une clé fournie et Nginx
 
 Travaillez dans `~/terraform-azure/lab04-exercice`.
 
-1. Créez une paire de clés SSH :
-
-```bash
-ssh-keygen -t rsa -b 4096 -f mykey -N ""
-```
-
-2. Ajoutez des variables dans `vars.tf` :
-
-```hcl
-variable "PATH_TO_PRIVATE_KEY" {
-  default = "mykey"
-}
-variable "PATH_TO_PUBLIC_KEY" {
-  default = "mykey.pub"
-}
-variable "INSTANCE_USERNAME" {
-  default = "azureuser"
-}
-```
-
-3. Sur Azure, il n'y a pas d'équivalent obligatoire à `aws_key_pair` : la clé publique est passée directement à la VM.
-
-```hcl
-  admin_username = var.INSTANCE_USERNAME
-
-  admin_ssh_key {
-    username   = var.INSTANCE_USERNAME
-    public_key = file(var.PATH_TO_PUBLIC_KEY)
-  }
-```
-
-> Pour stocker la clé comme ressource Azure réutilisable, on peut utiliser `azurerm_ssh_public_key`.
-
-4. Créez `script.sh` pour installer Nginx :
+1. Générez une paire de clés : `ssh-keygen -t rsa -b 4096 -f mykey -N ""` (ajoutez `mykey*` au `.gitignore`).
+2. Ajoutez dans `variables.tf` : `path_to_private_key` (défaut `"mykey"`), `path_to_public_key` (défaut `"mykey.pub"`), `instance_username` (défaut `"azureuser"`).
+3. Dans la VM, utilisez `file(var.path_to_public_key)` dans `admin_ssh_key`.
+4. Créez `script.sh` :
 
 ```bash
 #!/bin/bash
-# attendre la fin du démarrage de la VM
-until [[ -f /var/lib/cloud/instance/boot-finished ]]; do
-  sleep 1
-done
-# installer nginx
+until [[ -f /var/lib/cloud/instance/boot-finished ]]; do sleep 1; done
 apt-get update
 apt-get -y install nginx
-# s'assurer que nginx est démarré
-systemctl start nginx
+systemctl enable --now nginx
 ```
 
-5. Dans la ressource VM, ajoutez les provisioners et le bloc de connexion :
-
-```hcl
-  provisioner "file" {
-    source      = "script.sh"
-    destination = "/tmp/script.sh"
-  }
-
-  provisioner "remote-exec" {
-    inline = [
-      "chmod +x /tmp/script.sh",
-      "sudo sed -i -e 's/\\r$//' /tmp/script.sh",   # supprimer les CR (fichiers édités sous Windows)
-      "sudo /tmp/script.sh",
-    ]
-  }
-
-  connection {
-    host        = coalesce(self.public_ip_address, self.private_ip_address)
-    type        = "ssh"
-    user        = var.INSTANCE_USERNAME
-    private_key = file(var.PATH_TO_PRIVATE_KEY)
-  }
-```
-
-6. Vérifiez que le NSG autorise les ports 22 et 80, appliquez, puis ouvrez `http://<IP>`.
+5. ✏️ **TODO 4** — Écrivez vous-même le bloc `connection` et les deux provisioners (`file` vers `/tmp/script.sh`, puis `remote-exec`). Pensez aux fins de ligne Windows : `sed -i -e 's/\\r$//' /tmp/script.sh`.
+6. Appliquez (la VM existe déjà : que faut-il faire ?), puis ouvrez `http://<IP>`.
 
 ---
 
-## Pour aller plus loin : `custom_data` (cloud-init)
+## Pour aller plus loin — `custom_data` (cloud-init)
 
-HashiCorp recommande les provisioners **en dernier recours**. Sur Azure, on préfère passer le script au démarrage avec `custom_data` : aucune connexion SSH depuis Terraform n'est nécessaire.
+HashiCorp recommande les provisioners **en dernier recours**. Sur Azure, on passe plutôt le script **au démarrage** :
 
 ```hcl
 resource "azurerm_linux_virtual_machine" "web" {
@@ -237,14 +177,38 @@ resource "azurerm_linux_virtual_machine" "web" {
 }
 ```
 
-| | Provisioners | `custom_data` / cloud-init |
+| | 🟧 Provisioners | 🟩 `custom_data` / cloud-init |
 |---|---|---|
-| Connexion SSH depuis Terraform | Obligatoire | Non |
-| Port 22 ouvert | Oui | Non |
-| Erreurs visibles dans Terraform | Oui | Non (logs dans la VM) |
-| Recommandé en production | Non | Oui |
+| Connexion SSH depuis Terraform | obligatoire | non |
+| Port 22 ouvert pour Terraform | oui | non |
+| Erreurs visibles dans Terraform | oui | non (`/var/log/cloud-init-output.log`) |
+| Modifier le script | rien ne se passe (sauf `-replace`) | 🟥 `-/+` : `custom_data` force la recréation |
+| Recommandé en production | non | oui |
 
-## Vérification
+---
 
-- [ ] La page Apache s'affiche à l'adresse `public_dns`.
+## ✅ Vérification
+
+- [ ] `curl $(terraform output -raw url)` affiche la page Apache avec le nom d'hôte.
 - [ ] Vous savez expliquer pourquoi l'ajout d'un provisioner ne recrée pas la VM.
+- [ ] Exercice : la page Nginx s'affiche.
+
+## 🧯 Si vous voyez…
+
+| Message | Cause | Solution |
+|---|---|---|
+| `timeout - last error: dial tcp …:22: i/o timeout` | NSG : votre IP a changé | `curl -s ifconfig.me`, mettez à jour `allowed_ssh_cidr` |
+| `ssh: handshake failed: ssh: unable to authenticate` | mauvaise clé dans `connection` | la clé privée doit correspondre à `admin_ssh_key` |
+| `Could not get lock /var/lib/dpkg/lock-frontend` | cloud-init utilise encore apt | gardez `cloud-init status --wait` |
+| `/bin/bash^M: bad interpreter` | script édité sous Windows (CRLF) | `sed -i 's/\r$//'` ou VS Code → LF |
+| Ressource `tainted` après une erreur | le provisioner a échoué | corrigez puis `terraform apply` (recréation) |
+
+## 🏆 Défi
+
+Remplacez les provisioners du fil rouge par `custom_data`. Que montre le plan ? Une fois appliqué, comment vérifier que le script s'est bien exécuté ?
+
+## ❓ Questions de compréhension
+
+1. Pourquoi `self` est-il obligatoire dans `connection.host` ?
+2. Que devient une VM dont le provisioner échoue ?
+3. Citez deux raisons de préférer `custom_data` aux provisioners.
