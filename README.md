@@ -127,7 +127,7 @@ terraform-azure-labs/
 ```
 
 > [!TIP]
-> Pour distribuer aux stagiaires **sans** les corrigés : `git archive HEAD -- ':!corriges' ':!solutions' ':!formateur' -o labs-stagiaires.zip`.
+> Pour distribuer aux stagiaires **sans** les corrigés : `git archive --format=zip -o ../labs-stagiaires.zip HEAD -- . ':(exclude)corriges' ':(exclude)solutions' ':(exclude)formateur'`.
 
 ---
 
